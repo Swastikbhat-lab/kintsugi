@@ -39,6 +39,9 @@ if (!target || !source) {
     '  --max 8                iteration ceiling\n' +
     '  --dry                  compute patches, write nothing\n' +
     '  --allow-tokens         permit shared design-token retints (off by default)\n' +
+    '  --git                  commit each verified fix on its own branch;\n' +
+    '                         requires a clean tree so its edits stay yours to review\n' +
+    '  --branch <name>        branch to use with --git (default kintsugi/ui-fixes)\n' +
     '  --attach http://localhost:9222\n' +
     '                         use a browser you already signed into, instead of\n' +
     '                         launching a fresh one that can only see public pages',
@@ -54,6 +57,8 @@ const config: RunConfig = {
   dryRun: args.has('dry'),
   allowTokens: args.has('allow-tokens'),
   attach: args.get('attach'),
+  git: args.has('git'),
+  branch: args.get('branch'),
 };
 
 const ICON = {

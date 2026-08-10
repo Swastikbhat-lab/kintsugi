@@ -8,6 +8,7 @@ import { Ledger, ledgerPathFor } from './heal/ledger.js';
 import { proposePatches } from './heal/propose.js';
 import { Observer } from './observe.js';
 import { execute, type WorkNode } from './graph/workflow.js';
+import { inspect, useBranch, commitFile, logSince, head } from './git.js';
 import { ClaudeProvider, CRITIC_QUESTIONS, type Provider } from './agent/provider.js';
 
 type Emit = (e: LoopEvent) => void;
@@ -50,6 +51,8 @@ export class Loop {
   private ledger: Ledger;
   private observer: Observer;
   private provider: Provider | null = null;
+  /** HEAD before the run, so the final report can list only our commits. */
+  private gitBase: string | null = null;
 
   constructor(config: RunConfig, private emit: Emit) {
     this.state = {
@@ -84,6 +87,26 @@ export class Loop {
   async run(): Promise<RunState> {
     this.state.status = 'running';
     try {
+      // Before touching anything: if we are going to commit, the tree has to
+      // be clean first, or the person cannot tell our edits from their own.
+      if (this.state.config.git) {
+        const repo = await inspect(this.state.config.sourceRoot);
+        if (!repo.isRepo) {
+          throw new Error(`--git was set but ${this.state.config.sourceRoot} is not a git repository`);
+        }
+        if (!repo.clean) {
+          throw new Error(
+            `--git needs a clean tree; ${repo.dirty.length} path(s) have uncommitted changes ` +
+            `(${repo.dirty.slice(0, 3).join(', ')}${repo.dirty.length > 3 ? ', …' : ''}). ` +
+            `Commit or stash them first — otherwise Kintsugi's edits and yours end up in the same diff.`,
+          );
+        }
+        this.gitBase = await head(this.state.config.sourceRoot);
+        const branch = this.state.config.branch ?? `kintsugi/ui-fixes`;
+        await useBranch(this.state.config.sourceRoot, branch);
+        this.say('settle', `Committing to branch ${branch} (was on ${repo.branch ?? 'detached HEAD'})`);
+      }
+
       await this.observer.open();
       this.say('settle', this.observer.attached
         ? 'Attached to your signed-in browser — pages behind a login are reachable'
@@ -109,6 +132,15 @@ export class Loop {
       this.say('settle', `Run failed: ${(err as Error).message}`);
     } finally {
       await this.observer.close();
+
+      if (this.state.config.git && this.gitBase) {
+        const commits = await logSince(this.state.config.sourceRoot, this.gitBase);
+        this.say('settle', commits.length
+          ? `${commits.length} commit(s) on this branch — review with: git log -p ${this.gitBase.slice(0, 7)}..HEAD`
+          : 'No commits — nothing was verified as safe to apply');
+        for (const c of commits) this.say('settle', `  ${c}`);
+      }
+
       this.state.endedAt = new Date().toISOString();
     }
 
@@ -354,6 +386,26 @@ export class Loop {
           for (const c of collateralDetail) emit(`  caused: ${c}`);
         } else {
           emit('committed — finding cleared with no collateral');
+
+          // One commit per verified fix, so each can be read, kept, or
+          // dropped on its own merits rather than as an all-or-nothing blob.
+          if (this.state.config.git) {
+            try {
+              const sha = await commitFile(
+                this.state.config.sourceRoot,
+                patch.file,
+                `Fix ${target.detector} on ${relative(sourceRoot, patch.file)}`,
+                `${target.summary}\n\n${patch.rationale}\n\n` +
+                `Verified by re-measuring the page after the change: the finding cleared ` +
+                `and no new finding appeared.`,
+              );
+              if (sha) emit(`  ${sha} committed to git`);
+            } catch (err) {
+              // A failed commit does not invalidate the fix — the edit is
+              // still on disk and still verified. Say so and carry on.
+              emit(`  git commit failed (the fix is still applied): ${(err as Error).message}`);
+            }
+          }
         }
 
         this.record(target, patch, outcome, collateral);

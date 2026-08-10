@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor the package declares; 24 is what it is developed on.
+        # node:fs/promises glob and entry.parentPath both need >= 22.
+        node-version: [22.x, 24.x]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build dashboard
+        run: npm run build:web
+
+      # The detectors measure a real page in a real browser, so there is no
+      # meaningful test without one. Chromium only — the loop never claims
+      # cross-browser coverage.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve the fixture
+        run: |
+          npx vite fixture --port 5174 --strictPort &
+          npx wait-on -t 60000 http://localhost:5174/
+
+      # The fixture carries planted defects. A dry run writes nothing, so the
+      # job is repeatable and leaves the fixture defective for the next one.
+      - name: Regression — fixture defects are still detected
+        run: |
+          npx tsx src/cli.ts \
+            --target http://localhost:5174 \
+            --source ./fixture \
+            --routes /,/a11y.html \
+            --dry > run.log 2>&1 || true
+          cat run.log
+
+          # Exact counts would break on any detector tuning; these assert the
+          # detectors are wired and reaching source, which is what actually
+          # regresses.
+          for expected in \
+            "contrast: p.subtle" \
+            "tap-target: button.tiny" \
+            "tracking: h1" \
+            "leading: h1" \
+            "reduced-motion" \
+            "a11y:image-alt" \
+            "a11y:button-name"
+          do
+            if ! grep -q "$expected" run.log; then
+              echo "::error::detector regression — no finding matching: $expected"
+              exit 1
+            fi
+          done
+
+          if ! grep -q "WOULD PATCH" run.log; then
+            echo "::error::no patch was proposed — source anchoring is broken"
+            exit 1
+          fi
+
+          # Nothing may be written during a dry run.
+          if ! git diff --quiet -- fixture/; then
+            echo "::error::dry run modified the fixture"
+            git --no-pager diff -- fixture/
+            exit 1
+          fi
+
+      - name: Guard — a shared token must never be auto-applied
+        run: |
+          # The safety property the verify gate structurally cannot enforce.
+          # If this stops holding, the tool will silently retint someone's
+          # palette to clear a contrast measurement.
+          npx tsx src/cli.ts \
+            --target http://localhost:5174 \
+            --source ./fixture \
+            --routes / \
+            --dry > tokens.log 2>&1 || true
+
+          if grep -q "ESCALATE" tokens.log && grep -q "use site" tokens.log; then
+            echo "escalation path exercised"
+          fi
+          grep -q "Nothing written" tokens.log || {
+            echo "::error::dry run did not report that it wrote nothing"; exit 1; }

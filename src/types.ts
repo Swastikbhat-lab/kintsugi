@@ -143,6 +143,14 @@ export interface RunConfig {
    * tool launches its own, which can only reach pages that need no login.
    */
   attach?: string;
+  /**
+   * Commit each verified patch on a branch of Kintsugi's own, one commit per
+   * fix. Requires a clean tree — otherwise its edits and the person's are
+   * indistinguishable in the diff, which defeats the point of committing.
+   */
+  git?: boolean;
+  /** Branch to work on in git mode. */
+  branch?: string;
 }
 
 /**
