@@ -102,41 +102,110 @@ export class ClaudeProvider implements Provider {
   }
 
   /**
-   * Returns null when no credentials are configured, so the caller can run
-   * rules-only rather than failing. An absent key is a configuration state,
-   * not an error.
+   * Build a client, or return null if the SDK cannot find a credential.
+   *
+   * Deliberately does not test for `ANTHROPIC_API_KEY` itself. The SDK
+   * resolves credentials from several places — that variable, then
+   * `ANTHROPIC_AUTH_TOKEN`, then an `ant auth login` profile on disk, then
+   * workload identity — so checking one of them reports "no credentials" to
+   * someone who is perfectly well authenticated, and the feature looks broken
+   * rather than unconfigured. Whether the credential actually works is
+   * answered by `preflight()`, which asks the API instead of guessing.
    */
   static async create(): Promise<ClaudeProvider | null> {
-    if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) return null;
     try {
       const { default: Anthropic } = await import('@anthropic-ai/sdk');
       return new ClaudeProvider(new Anthropic());
     } catch {
+      // No SDK installed, or no credential the SDK could resolve at all.
       return null;
     }
   }
 
+  /**
+   * One cheap call to find out whether this actually works, before the loop
+   * starts depending on it.
+   *
+   * Without this, a rejected request shape or a bad key is indistinguishable
+   * from the model simply having no suggestion: both produce zero patches.
+   * That is the worst failure mode a proposer can have, because the run looks
+   * successful and quietly did half the work.
+   */
+  async preflight(): Promise<{ ok: boolean; detail: string }> {
+    try {
+      const out = await this.call(
+        'Reply with the requested JSON and nothing else.',
+        'Return {"ok": true}.',
+        {
+          type: 'object',
+          properties: { ok: { type: 'boolean' } },
+          required: ['ok'],
+          additionalProperties: false,
+        },
+      );
+      if (out?.ok === true) {
+        return { ok: true, detail: this.degraded ? 'reachable (without server-side fallbacks)' : 'reachable' };
+      }
+      return { ok: false, detail: 'call succeeded but returned no usable JSON' };
+    } catch (err) {
+      return { ok: false, detail: (err as Error).message };
+    }
+  }
+
+  /** Set once the full request shape has been rejected, so it is tried once. */
+  private degraded = false;
+
   private async call(system: string, prompt: string, schema: unknown): Promise<any | null> {
-    const res = await this.client.beta.messages.create({
+    const base = {
       model: 'claude-opus-5',
       max_tokens: 16000,
       // Thinking is on by default on this model; stated explicitly so the
       // intent survives a future default change.
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'high', format: { type: 'json_schema', schema } },
-      // Safety classifiers can decline; the fallback re-serves the request
-      // rather than dropping it.
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
+      thinking: { type: 'adaptive' as const },
       system,
-      messages: [{ role: 'user', content: prompt }],
-    });
+      messages: [{ role: 'user' as const, content: prompt }],
+    };
+    const structured = { effort: 'high' as const, format: { type: 'json_schema' as const, schema } };
+
+    let res;
+    try {
+      res = await this.client.beta.messages.create({
+        ...base,
+        output_config: structured,
+        // Safety classifiers can decline; the fallback re-serves the request
+        // rather than dropping it.
+        ...(this.degraded ? {} : {
+          betas: ['server-side-fallback-2026-07-01'],
+          fallbacks: 'default',
+        }),
+      });
+    } catch (err) {
+      // Fallbacks combined with structured outputs is not a combination this
+      // has been able to verify against the live API. If the shape is
+      // rejected, drop the optional half rather than losing the proposer
+      // entirely — a refusal that stops is far better than no proposals at
+      // all — and remember, so this costs one request and not every request.
+      const status = (err as any)?.status;
+      if (this.degraded || (status !== 400 && status !== 404)) throw err;
+      this.degraded = true;
+      res = await this.client.beta.messages.create({ ...base, output_config: structured });
+    }
 
     // Check the stop reason before touching content: on a refusal, content is
     // empty or partial and indexing into it throws.
     if (res.stop_reason === 'refusal') return null;
+
     const text = res.content.find((b: any) => b.type === 'text')?.text;
-    return text ? JSON.parse(text) : null;
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Structured outputs should make this impossible. If it happens, say so
+      // plainly rather than surfacing a bare SyntaxError from deep in a loop.
+      throw new Error(
+        `model returned text that was not JSON despite a schema being set: ${text.slice(0, 120)}`,
+      );
+    }
   }
 
   async propose(finding: Finding, sourceRoot: string): Promise<Patch[]> {
@@ -236,7 +305,7 @@ async function locateSource(
   for await (const entry of glob(STYLE_GLOB, { cwd: sourceRoot, withFileTypes: true })) {
     const absolute = `${entry.parentPath}/${entry.name}`;
     const rel = relative(sourceRoot, absolute);
-    if (/(^|[\\/])(node_modules|dist|build|\.git|\.kintsugi)([\\/]|$)/.test(rel)) continue;
+    if (/(^|[\\/])(node_modules|dist|build|\.git|\.botstacks-ui-repair)([\\/]|$)/.test(rel)) continue;
 
     const text = await readFile(absolute, 'utf8');
     if (needles.some((n) => text.includes(n))) return { absolute, relative: rel };

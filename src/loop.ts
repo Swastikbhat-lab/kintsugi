@@ -112,10 +112,23 @@ export class Loop {
         ? 'Attached to your signed-in browser — pages behind a login are reachable'
         : 'Launched a fresh browser — only pages that need no login are reachable (use --attach for the rest)');
 
-      this.provider = await ClaudeProvider.create();
-      this.say('settle', this.provider
-        ? `Model proposer available (${this.provider.name}) — rules first, model for what rules cannot reach`
-        : 'No model credentials found — running rules-only (every patch still verified the same way)');
+      // Establish up front whether the model path works, rather than letting
+      // a bad credential or a rejected request shape masquerade as the model
+      // having nothing to suggest. Both produce zero patches; only one is a
+      // problem, and the run should say which.
+      const provider = await ClaudeProvider.create();
+      if (!provider) {
+        this.say('settle', 'No model credentials found — running rules-only (every patch is still verified the same way)');
+      } else {
+        const check = await provider.preflight();
+        if (check.ok) {
+          this.provider = provider;
+          this.say('settle', `Model proposer ${check.detail} — rules first, model for what rules cannot reach`);
+        } else {
+          this.say('settle', `Model proposer unavailable: ${check.detail}`);
+          this.say('settle', 'Continuing rules-only. Findings with no mechanical rule will be reported, not fixed.');
+        }
+      }
 
       for (let i = 1; i <= this.state.config.maxIterations; i++) {
         this.state.iteration = i;
