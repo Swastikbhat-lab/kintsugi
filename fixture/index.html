@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fixture — an app with known defects</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Quarterly report</h1>
+
+      <!-- Defect 1: subtle text token fails AA on this surface. -->
+      <p class="subtle">Updated 4 minutes ago by the ingest worker.</p>
+
+      <p class="body">
+        Revenue held flat against a seasonal dip, which the forecast had not
+        priced in.
+      </p>
+
+      <!-- Defect 2: the container clips a long unbroken token. -->
+      <div class="idbox">
+        <span class="idlabel">ref-a7f3c9e21b48d05f6a1c3e97b2d84f60ac5e1937</span>
+      </div>
+
+      <!-- Defect 3: control below the 24px minimum target size. -->
+      <div class="row">
+        <button class="tiny">×</button>
+        <span class="body">Dismiss this notice</span>
+      </div>
+
+      <!-- Measurable: this one passes and should stay untouched. -->
+      <p class="ok">This paragraph already meets contrast and must not change.</p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Accessibility fixture</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Accessibility fixture</h1>
+
+      <!-- no alt text -->
+      <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" width="40" height="40" />
+
+      <!-- input with no label -->
+      <input type="text" placeholder="Search" />
+
+      <!-- button with no accessible name -->
+      <button class="tiny"></button>
+
+      <!-- link with no discernible text -->
+      <a href="/somewhere"><span></span></a>
+
+      <!-- heading order skips h2 -->
+      <h4>Skipped a level</h4>
+    </main>
+  </body>
+</html>
