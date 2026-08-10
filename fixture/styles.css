@@ -64,6 +64,17 @@ h1 {
   transition: width 240ms ease;
 }
 
+/* Policy control — 30x30 clears WCAG 2.2 AA (24) and fails the enhanced
+   criterion (44). Which profile is active decides whether this is a defect. */
+.midsize {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #9ca3af;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
 /* Defect 3 — 18x18 is under the 24px minimum target size. */
 .tiny {
   width: 18px;

@@ -1,3 +1,5 @@
+import type { PolicyRules } from '../policy.js';
+
 /**
  * Design detector — the subset of the apple-design guidance that can be
  * checked against the live DOM without asking anyone's opinion.
@@ -10,7 +12,48 @@
  * Each finding names the principle it came from, so a patch can be argued
  * with rather than merely accepted.
  */
-export const DESIGN_PROBE = `(() => {
+/**
+ * A digest of how the page is currently painted, used to tell whether a theme
+ * switch actually did anything.
+ *
+ * Comparing `document.body`'s background is the obvious check and it is wrong:
+ * apps commonly paint their surface on a nested element, so body stays one
+ * colour while every theme in the product renders differently. Sampling the
+ * colours actually in use across the page catches the change wherever it is
+ * painted, and the theme attribute is included because an app that exposes one
+ * is telling us directly.
+ */
+export const THEME_SIGNATURE = `(() => {
+  const el = document.documentElement;
+  // Deliberately excludes the computed \`color-scheme\`. Emulating a scheme
+  // changes that property whether or not the app reacts, so including it
+  // means the signature reports a difference it caused itself — and the run
+  // then claims to have measured two themes while rendering one twice.
+  // Only rendered output counts.
+  const parts = [
+    el.getAttribute('data-theme') || '',
+    el.className || '',
+  ];
+  // The *set* of colours in use, sorted — not a positional sample. Walking
+  // the DOM in order and taking the first N is not stable: two loads of the
+  // same page can differ in element order or in what has rendered yet, so the
+  // signature changes when nothing about the theme did. A sorted set of
+  // distinct colours is identical for identical renderings and differs only
+  // when the palette actually differs.
+  const colours = new Set();
+  for (const node of document.querySelectorAll('*')) {
+    const r = node.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) continue;
+    const cs = getComputedStyle(node);
+    if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+    colours.add(cs.color);
+    if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') colours.add(cs.backgroundColor);
+  }
+  parts.push([...colours].sort().join(','));
+  return parts.join('|');
+})()`;
+
+export const designProbe = (p: PolicyRules) => `(() => {
   const out = {
     tracking: [], leading: [], nonCompositor: [],
     stackedTranslucency: [], reducedMotion: null, pressFeedback: null,
@@ -42,10 +85,10 @@ export const DESIGN_PROBE = `(() => {
 
     const cs = getComputedStyle(el);
     const size = parseFloat(cs.fontSize);
-    if (size < 32) continue;
+    if (size < ${p.displayTypePx}) continue;
 
     const tracking = cs.letterSpacing === 'normal' ? 0 : parseFloat(cs.letterSpacing);
-    if (tracking >= 0) {
+    if (${p.requireNegativeTracking} && tracking >= 0) {
       out.tracking.push({
         selector: describe(el), fontSize: size,
         letterSpacing: cs.letterSpacing,
@@ -56,7 +99,7 @@ export const DESIGN_PROBE = `(() => {
 
     const lh = cs.lineHeight === 'normal' ? size * 1.2 : parseFloat(cs.lineHeight);
     const ratio = lh / size;
-    if (ratio > 1.3) {
+    if (${p.displayLeadingMax > 0} && ratio > ${p.displayLeadingMax}) {
       out.leading.push({
         selector: describe(el), fontSize: size,
         lineHeight: Math.round(ratio * 100) / 100,

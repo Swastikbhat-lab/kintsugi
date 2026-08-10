@@ -6,7 +6,9 @@
  * layouts are full of harmlessly overlapping decorative boxes and reporting
  * those buries the real hits.
  */
-export const LAYOUT_PROBE = `(() => {
+import type { PolicyRules } from '../policy.js';
+
+export const layoutProbe = (p: PolicyRules) => `(() => {
   const out = { clipped: [], overflow: null, overlaps: [], smallTargets: [] };
 
   const describe = (el) =>
@@ -97,7 +99,7 @@ export const LAYOUT_PROBE = `(() => {
 
   // --- tap targets --------------------------------------------------------
   for (const { el, r } of items) {
-    if (r.width < 24 || r.height < 24) {
+    if (${p.tapTarget > 0} && (r.width < ${p.tapTarget} || r.height < ${p.tapTarget})) {
       out.smallTargets.push({
         selector: describe(el),
         width: Math.round(r.width),

@@ -1,12 +1,18 @@
 # Kintsugi
 
-Self-healing UI. Point it at a running web app and a repo it may edit; it
-models the interface as a graph, then repairs it in loops that verify their
-own work.
+Finds interface defects in a running web app by measuring the rendered page,
+repairs the ones that have an objectively correct fix, and re-measures to
+confirm the repair worked. Anything it cannot verify, it reverts.
 
-The name is the pottery repair that leaves the seam visible in gold. Nothing
-here hides that a repair happened — every patch is recorded with what it was
-for and whether it survived.
+Point it at a dev server and the repo that builds it.
+
+```bash
+npm install && npx playwright install chromium
+npm run cli -- --target http://localhost:5173 --source ./frontend --routes /login --dry
+```
+
+`--dry` surveys without writing anything, which is how a first run on an
+unfamiliar codebase should start.
 
 Three ideas, layered: an **agent** proposes, a **loop** makes it reliable, a
 **graph** makes it fast. Each one only earns its place because the one below
@@ -111,8 +117,35 @@ verify    ← deterministic (a model grading its own patch is not a gate)
 
 Rules run first — free, instant, and already proven on contrast, tap targets,
 tracking, leading, and reduced motion. The model is consulted only for what no
-rule reaches. Set `ANTHROPIC_API_KEY` to enable it; without one the loop runs
-rules-only and says so.
+rule reaches: overlapping controls, console errors, what an animation should
+do instead, and the accessibility rules that need to know what the content
+means (alt text, accessible names, labels). Those are the majority of what is
+detected and none of them have a mechanical fix.
+
+### Enabling it
+
+Set a credential in your own environment — the tool reads it from there and
+never stores or transmits it:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "..."      # PowerShell, current session
+setx ANTHROPIC_API_KEY "..."        # persist it
+```
+
+Any credential source the Anthropic SDK understands works, including an
+`ant auth login` profile; the tool does not look for one variable in
+particular.
+
+On startup it makes one cheap call to check the credential and the request
+shape, then reports `Model proposer reachable` or the specific reason it is
+not. That check exists because a bad credential and a model with no suggestion
+both produce zero patches, and only one of those is a problem.
+
+> **Status: the model path has not yet been exercised against the live API.**
+> It typechecks, degrades safely, and reports its own failures, but no run has
+> confirmed a model-proposed patch surviving verification. Treat the first run
+> with a credential as the real test. Everything the tool has actually fixed
+> so far came from the deterministic rules.
 
 Two safeguards on model-proposed patches. First, three **checkers** review the
 diff in parallel — is it correct, does it reach beyond the defect, is the
@@ -142,6 +175,36 @@ The last row is the boundary, not a gap. A model widens what can be
 *proposed*; it never widens what can be *checked*. A defect with no objective
 check cannot be looped on at all, and pretending otherwise is how a loop
 becomes an expensive way to generate drafts.
+
+## Which standard is being enforced
+
+Thresholds are choices, not facts, and sources disagree. A 24×24 touch target
+is the WCAG 2.2 Level AA minimum; 44×44 is the Level AAA enhanced criterion
+and what most mobile guidance recommends. Both are right, for different
+commitments — so the profile is selected once, explicitly, and every finding
+records the profile and rule that produced it.
+
+```bash
+npm run cli -- ... --policy mobile-touch
+```
+
+| Profile | Contrast | Target size |
+|---|---|---|
+| `wcag-22-aa` *(default)* | 4.5 / 3.0 | 24px |
+| `wcag-22-aaa` | 7.0 / 4.5 | 44px |
+| `mobile-touch` | 4.5 / 3.0 | 44px |
+| `botstacks-product` | 4.5 / 3.0 | 24px |
+| `performance-strict` | not assessed | not assessed |
+
+The fixture carries a deliberate 30×30 control: it clears AA and fails the
+enhanced criterion, so switching profiles visibly changes whether it is a
+defect. `performance-strict` reports contrast and target size as *not
+assessed* rather than passing — a profile that does not examine something must
+never read as having approved it.
+
+This is also the only correct way to absorb external design guidance. A source
+recommending 44px targets becomes a profile someone selects, not a number that
+quietly replaces the compliance floor.
 
 ## Blast radius — the check verification cannot do
 
@@ -211,6 +274,88 @@ Exits non-zero while findings remain, so it can gate a pipeline.
 State lives in `~/.kintsugi/ledgers/`, keyed by source root — never inside the
 repo under audit. Kintsugi is pointed at codebases it does not own, and
 leaving an untracked directory in someone's working tree is not its to make.
+
+## Against the BotStacks frontend
+
+Start the frontend dev server, then survey without writing anything:
+
+```bash
+npm run dev --prefix botstacks-sandbox-build/frontend      # serves :5173
+
+npm run cli -- \
+  --target http://localhost:5173 \
+  --source ../botstacks-sandbox-build/frontend \
+  --routes /login,/forgot-password \
+  --dry
+```
+
+Pages behind the login need a browser you have already signed into — see
+"Reaching real apps" above. It never handles credentials itself.
+
+Two things to expect on this codebase specifically. Most contrast findings
+resolve to shared tokens in `src/theme/tokens.css`, so they are reported with
+a use-site count rather than applied — `--color-primary` alone is referenced
+in over 300 places, and changing it is a palette decision. And styles that
+come from Tailwind utilities in markup have no CSS rule to patch, so those are
+reported only; CSS Modules are resolved back to their authoring names and can
+be patched normally.
+
+Add `--git` to commit each verified fix separately on its own branch. It
+requires a clean tree, so its edits never mix into work in progress.
+
+## Running it continuously
+
+A single run is a snapshot. On a cadence it becomes maintenance — the
+interface stays repaired as the app changes, instead of being repaired once
+and drifting.
+
+Locally:
+
+```bash
+npm run cli -- --target http://localhost:5173 --source ../frontend \
+  --routes /login,/dashboard --watch 30
+```
+
+Each cycle reports only what moved. A cycle that changed nothing prints one
+line, so a cadence you actually leave running does not train you to ignore it.
+
+The ledger is what makes repetition safe rather than wasteful: attempts
+persist per target, so each cycle starts knowing which patches earlier cycles
+already disproved instead of re-proposing them forever. Successive cycles
+converge — on the fixture, 8 outstanding becomes 7, then 5, then 3, and the 3
+that remain are the ones with no mechanical rule.
+
+### On a schedule, in CI
+
+`.github/workflows/scheduled-repair.yml` is a reusable workflow. The app's
+repository calls it, and the run boots that app, walks the routes, and opens a
+pull request containing only fixes that survived verification:
+
+```yaml
+name: UI repair
+on:
+  schedule: [{ cron: "0 6 * * 1" }]   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  repair:
+    uses: Swastikbhat-lab/kintsugi/.github/workflows/scheduled-repair.yml@main
+    with:
+      frontend-repo: BotStacks/botstacks-sandbox-build
+      working-directory: frontend
+      routes: /login,/forgot-password
+      dry-run: true          # report only; flip once a first run is reviewed
+    secrets:
+      repo-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+Start with `dry-run: true`. It writes nothing and puts the findings in the job
+summary, which is the right way to see what a scheduled run would do to your
+repository before letting it do so.
+
+A pull request rather than a push to a tracked branch, deliberately: the loop
+proves a defect cleared, not that the change was wanted. Each commit is one
+fix and can be taken or dropped on its own.
 
 ## What it will not do
 

@@ -29,6 +29,14 @@
         <span class="body">Dismiss this notice</span>
       </div>
 
+      <!-- Policy control: 30x30 clears the WCAG 2.2 AA minimum of 24 but not
+           the enhanced 44. It should be reported under mobile-touch and
+           wcag-22-aaa, and silent under wcag-22-aa. -->
+      <div class="row">
+        <button class="midsize">OK</button>
+        <span class="body">Passes AA target size, fails the enhanced one</span>
+      </div>
+
       <!-- Measurable: this one passes and should stay untouched. -->
       <p class="ok">This paragraph already meets contrast and must not change.</p>
     </main>

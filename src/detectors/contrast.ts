@@ -21,7 +21,9 @@
  * In cases 2 and 3 the honest answer is that computed styles cannot settle it
  * and a human or a screenshot has to. We say so rather than guessing.
  */
-export const CONTRAST_PROBE = `(() => {
+import type { PolicyRules } from '../policy.js';
+
+export const contrastProbe = (p: PolicyRules) => `(() => {
   const parseRGBA = (s) => {
     const m = String(s).match(/rgba?\\(([^)]+)\\)/);
     if (!m) return null;
@@ -105,7 +107,10 @@ export const CONTRAST_PROBE = `(() => {
     const weight = parseInt(cs.fontWeight, 10) || 400;
     // WCAG large text: >=24px, or >=18.66px when bold.
     const large = size >= 24 || (size >= 18.66 && weight >= 700);
-    const threshold = large ? 3.0 : 4.5;
+    const threshold = large ? ${p.contrastLarge} : ${p.contrastNormal};
+    // A profile that does not examine contrast must not be read as approving
+    // it, so zero means "not assessed" rather than "everything passes".
+    if (threshold <= 0) continue;
 
     const backdrop = resolveBackdrop(el);
     const selector = el.tagName.toLowerCase() +

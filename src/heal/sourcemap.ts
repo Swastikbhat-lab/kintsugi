@@ -276,24 +276,38 @@ const fileCache = new Map<string, { mtimeMs: number; size: number; parsed: Parse
 const rootCache = new Map<string, string[]>();
 
 const MODULE_GLOB = '**/*.module.{css,scss,sass,less}';
+const SHEET_GLOB = '**/*.{css,scss,sass,less}';
+const IS_MODULE = /\.module\.(css|scss|sass|less)$/;
 const SKIP = /(^|[\\/])(node_modules|dist|build|\.git|\.kintsugi)([\\/]|$)/;
 
 /**
- * Only CSS Modules stylesheets are searched. A hashed class can only have
- * come from one, and widening to plain stylesheets would let an unrelated
- * global `.title` outrank the module rule that actually styles the element.
+ * Stylesheets under a root, split by whether the build rewrites their class
+ * names.
+ *
+ * `module` is what `resolveClass` searches: a hashed class can only have come
+ * from a CSS Modules stylesheet, and widening to plain ones would let an
+ * unrelated global `.title` outrank the module rule that actually styles the
+ * element.
+ *
+ * `plain` is the exact complement, for callers that already hold an authoring
+ * name because the build never scoped it. Keeping the two disjoint is what
+ * stops a module's `.note` from being offered as the source of a plain `.note`
+ * it has nothing to do with.
  */
-async function moduleFiles(sourceRoot: string): Promise<string[]> {
-  const cached = rootCache.get(sourceRoot);
+async function sheetFiles(sourceRoot: string, kind: 'module' | 'plain'): Promise<string[]> {
+  const key = `${kind}:${sourceRoot}`;
+  const cached = rootCache.get(key);
   if (cached) return cached;
 
+  const glob_ = kind === 'module' ? MODULE_GLOB : SHEET_GLOB;
   const out: string[] = [];
-  for await (const entry of glob(MODULE_GLOB, { cwd: sourceRoot, withFileTypes: true })) {
+  for await (const entry of glob(glob_, { cwd: sourceRoot, withFileTypes: true })) {
     const full = join(entry.parentPath, entry.name);
     if (SKIP.test(relative(sourceRoot, full))) continue;
+    if (kind === 'plain' && IS_MODULE.test(full)) continue;
     out.push(full);
   }
-  rootCache.set(sourceRoot, out);
+  rootCache.set(key, out);
   return out;
 }
 
@@ -319,6 +333,25 @@ async function loadFile(file: string): Promise<ParsedFile> {
 export function clearSourceCache(): void {
   fileCache.clear();
   rootCache.clear();
+}
+
+/** One scanned stylesheet: its text, and the offsets of every rule in it. */
+export type Stylesheet = ParsedFile;
+/** One brace-delimited block, located by offset rather than by pattern. */
+export type StyleRule = RawRule;
+
+/**
+ * Every plain (non-CSS-Modules) stylesheet under a root, scanned.
+ *
+ * Exported because locating a rule safely is not specific to unhashing a
+ * class. Anything that needs to edit a rule it did not find by name — a design
+ * token's use sites, say — needs the same comment-, string- and nesting-aware
+ * scan, and the same guarantee that the anchor it gets back occurs once.
+ */
+export async function plainStylesheets(sourceRoot: string): Promise<Stylesheet[]> {
+  const files = await sheetFiles(sourceRoot, 'plain');
+  const loaded = await Promise.all(files.map((f) => loadFile(f).catch(() => null)));
+  return loaded.filter((s): s is Stylesheet => s !== null);
 }
 
 // ------------------------------------------------------------------ matching
@@ -388,6 +421,46 @@ function uniqueAnchorStart(text: string, start: number, end: number): number | n
   return null;
 }
 
+/**
+ * A `find` anchor for one scanned rule that is guaranteed to occur in the file
+ * exactly once, or null when the file repeats itself so thoroughly that no
+ * bounded anchor is unique.
+ *
+ * Patches are applied by replacing the first occurrence of a string, so this
+ * uniqueness is the whole contract: without it "edit this rule" silently
+ * becomes "edit whichever rule happens to look like it first".
+ */
+export function anchorRule(sheet: Stylesheet, rule: StyleRule):
+  { ruleOpen: string; ruleBody: string } | null {
+  const start = uniqueAnchorStart(sheet.text, rule.start, rule.openEnd);
+  if (start === null) return null;
+
+  const ruleOpen = sheet.text.slice(start, rule.openEnd);
+  // Restated against the finished string rather than trusted from the search
+  // that produced it.
+  if (sheet.text.indexOf(ruleOpen) !== sheet.text.lastIndexOf(ruleOpen)) return null;
+
+  return {
+    ruleOpen,
+    // Starts at the same offset, so the body always contains the anchor as its
+    // prefix and is unique for the same reason.
+    ruleBody: sheet.text.slice(start, rule.close),
+  };
+}
+
+/**
+ * The strongest claim any selector in a rule's list makes on a class, or null
+ * if none of them mentions it. Lower is more direct — see `rankSelector`.
+ */
+export function ruleRank(selector: string, local: string): number | null {
+  let best: number | null = null;
+  for (const part of splitSelectorList(selector)) {
+    const r = rankSelector(part, local);
+    if (r !== null && (best === null || r < best)) best = r;
+  }
+  return best;
+}
+
 // ------------------------------------------------------------------ resolving
 
 /** Locate the source rule for a runtime class. Returns null when it cannot be resolved uniquely. */
@@ -395,7 +468,7 @@ export async function resolveClass(runtimeClass: string, sourceRoot: string): Pr
   const scoped = parseScoped(runtimeClass);
   if (!scoped) return null;
 
-  const files = await moduleFiles(sourceRoot);
+  const files = await sheetFiles(sourceRoot, 'module');
   const loaded = await Promise.all(files.map((f) => loadFile(f).catch(() => null)));
   const parsed = loaded.filter((p): p is ParsedFile => p !== null);
   if (!parsed.length) return null;
@@ -426,11 +499,7 @@ export async function resolveClass(runtimeClass: string, sourceRoot: string): Pr
   for (const file of searched) {
     for (const rule of file.rules) {
       if (!rule.selector || rule.selector.startsWith('@')) continue;
-      let rank: number | null = null;
-      for (const part of splitSelectorList(rule.selector)) {
-        const r = rankSelector(part, local);
-        if (r !== null && (rank === null || r < rank)) rank = r;
-      }
+      const rank = ruleRank(rule.selector, local);
       if (rank !== null) candidates.push({ file, rule, rank });
     }
   }
@@ -456,26 +525,14 @@ export async function resolveClass(runtimeClass: string, sourceRoot: string): Pr
   if (shortlist.length !== 1) return null;
 
   const { file, rule } = shortlist[0];
-  const anchorStart = uniqueAnchorStart(file.text, rule.start, rule.openEnd);
-  if (anchorStart === null) return null;
+  const anchored = anchorRule(file, rule);
+  if (!anchored) return null;
 
-  const ruleOpen = file.text.slice(anchorStart, rule.openEnd);
-  // The uniqueness that the whole contract rests on, restated against the
-  // finished string rather than trusted from the search that produced it.
-  if (file.text.indexOf(ruleOpen) !== file.text.lastIndexOf(ruleOpen)) return null;
-
-  return {
-    file: file.file,
-    localClass: local,
-    ruleOpen,
-    // Starts at the same offset as ruleOpen, so the body always contains the
-    // anchor as its prefix and is unique for the same reason.
-    ruleBody: file.text.slice(anchorStart, rule.close),
-  };
+  return { file: file.file, localClass: local, ...anchored };
 }
 
 /** Class names in a DOM selector, in the order they appear. */
-function selectorClasses(selector: string): string[] {
+export function selectorClasses(selector: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < selector.length) {

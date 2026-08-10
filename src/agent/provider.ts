@@ -305,7 +305,7 @@ async function locateSource(
   for await (const entry of glob(STYLE_GLOB, { cwd: sourceRoot, withFileTypes: true })) {
     const absolute = `${entry.parentPath}/${entry.name}`;
     const rel = relative(sourceRoot, absolute);
-    if (/(^|[\\/])(node_modules|dist|build|\.git|\.botstacks-ui-repair)([\\/]|$)/.test(rel)) continue;
+    if (/(^|[\\/])(node_modules|dist|build|\.git|\.kintsugi)([\\/]|$)/.test(rel)) continue;
 
     const text = await readFile(absolute, 'utf8');
     if (needles.some((n) => text.includes(n))) return { absolute, relative: rel };

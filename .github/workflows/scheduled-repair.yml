@@ -1,0 +1,175 @@
+name: Scheduled UI repair
+
+# Reusable. A frontend repo calls this on a cadence; the run boots that repo's
+# dev server, walks the routes, and opens a pull request containing only fixes
+# that were verified by re-measuring the page.
+#
+# It opens a PR rather than pushing to a branch people track, because every
+# change here is still someone's to accept — the loop proves a defect cleared,
+# not that the change was wanted.
+
+on:
+  workflow_call:
+    inputs:
+      frontend-repo:
+        description: Repository holding the app to repair, e.g. BotStacks/botstacks-sandbox-build
+        required: true
+        type: string
+      frontend-ref:
+        description: Branch to repair and base the pull request on
+        required: false
+        default: main
+        type: string
+      working-directory:
+        description: Path within that repo containing package.json
+        required: false
+        default: .
+        type: string
+      start-command:
+        description: Command that starts the dev server
+        required: false
+        default: npm run dev
+        type: string
+      port:
+        required: false
+        default: 5173
+        type: number
+      routes:
+        description: Comma-separated routes to walk
+        required: false
+        default: /
+        type: string
+      max-iterations:
+        required: false
+        default: 12
+        type: number
+      dry-run:
+        description: Report only. Leave true until a first run has been reviewed.
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      repo-token:
+        description: Token with contents/pull-request write on the frontend repo
+        required: true
+      anthropic-api-key:
+        description: Optional. Without it the run uses deterministic rules only.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repair tool
+        uses: actions/checkout@v4
+        with:
+          path: tool
+
+      - name: Check out the app to repair
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.frontend-repo }}
+          ref: ${{ inputs.frontend-ref }}
+          token: ${{ secrets.repo-token }}
+          path: app
+          # Full history: the tool commits per fix and needs a real base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+
+      - name: Install the tool
+        working-directory: tool
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Install the app
+        working-directory: app/${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Start the app
+        working-directory: app/${{ inputs.working-directory }}
+        run: |
+          ${{ inputs.start-command }} &
+          npx --yes wait-on -t 120000 http://localhost:${{ inputs.port }}/
+
+      - name: Identify commits
+        working-directory: app
+        run: |
+          git config user.name "ui-repair"
+          git config user.email "ui-repair@users.noreply.github.com"
+
+      - name: Run the loop
+        id: repair
+        working-directory: tool
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+        run: |
+          set +e
+          npx tsx src/cli.ts \
+            --target http://localhost:${{ inputs.port }} \
+            --source ../app/${{ inputs.working-directory }} \
+            --routes '${{ inputs.routes }}' \
+            --max ${{ inputs.max-iterations }} \
+            ${{ inputs.dry-run && '--dry' || '--git --branch ui-repair/scheduled' }} \
+            2>&1 | tee run.log
+          # A non-zero exit means findings remain, which is the normal state and
+          # must not fail the job. Only a crash should.
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        working-directory: tool
+        run: |
+          {
+            echo "## UI repair"
+            echo
+            if [ "${{ inputs.dry-run }}" = "true" ]; then
+              echo "Report-only run. Nothing was written."
+              echo
+            fi
+            echo '```'
+            # The head of the log is setup noise; the tail is the verdict.
+            tail -n 40 run.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open a pull request
+        if: ${{ inputs.dry-run == false }}
+        working-directory: app
+        env:
+          GH_TOKEN: ${{ secrets.repo-token }}
+        run: |
+          # Nothing verified means nothing to propose, which is a normal result.
+          if [ -z "$(git log --oneline ${{ inputs.frontend-ref }}..HEAD)" ]; then
+            echo "No verified fixes this run."
+            exit 0
+          fi
+
+          git push -u origin ui-repair/scheduled --force-with-lease
+
+          BODY=$(printf '%s\n' \
+            'Automated UI repair. Each commit is one fix that was applied and then' \
+            'confirmed by re-measuring the page: the defect cleared and nothing new' \
+            'appeared. Anything that failed either check was reverted and is not here.' \
+            '' \
+            'Changes reaching past a single component — shared design tokens, bare' \
+            'element rules — were deliberately not applied. They are listed in the' \
+            'run summary with the number of places they would affect, because those' \
+            'are product decisions rather than defect fixes.' \
+            '' \
+            'Review each commit on its own; they are independent.')
+
+          gh pr create \
+            --repo ${{ inputs.frontend-repo }} \
+            --base ${{ inputs.frontend-ref }} \
+            --head ui-repair/scheduled \
+            --title "UI repair: verified fixes" \
+            --body "$BODY" 2>/dev/null || echo "A pull request for this branch already exists; it has been updated."

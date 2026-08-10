@@ -57,14 +57,30 @@ export interface Finding {
 
 // ---------------------------------------------------------------- repair
 
-export interface Patch {
-  id: string;
+/** One exact string replacement in one file. No regex, no ambiguity. */
+export interface Edit {
   /** Absolute path to the source file this edits. */
   file: string;
-  /** Exact string replacement — no regex, no ambiguity. */
   find: string;
   replace: string;
+}
+
+export interface Patch extends Edit {
+  id: string;
   rationale: string;
+  /**
+   * Further edits that only make sense together with the primary one.
+   *
+   * Introducing a design token is the case that needs this: declaring
+   * `--x-accessible` and pointing the component at it are two edits, usually
+   * in different places, and either alone is worse than neither — a token
+   * nothing references, or a reference to a token that does not exist. They
+   * are applied and reverted as a unit, and the verify step sees one change.
+   *
+   * Most patches have none. A patch that does carry them is still one patch:
+   * one thing tried, one verdict, one ledger entry.
+   */
+  also?: Edit[];
   /**
    * How far the blast radius reaches.
    *
@@ -126,8 +142,20 @@ export interface RunConfig {
   target: string;
   /** Routes to walk. Each becomes a surface node. */
   routes: string[];
+  /**
+   * Colour schemes to measure each route under.
+   *
+   * Most contrast bugs exist in exactly one theme — a colour chosen against a
+   * dark surface gets reused on a light one — so measuring whichever theme
+   * the page happened to load in finds roughly half of them. Defaults to the
+   * page's own default when unset.
+   */
+  themes?: ('light' | 'dark')[];
   /** Repo root the healers are allowed to edit. Nothing outside is touchable. */
   sourceRoot: string;
+  /** Threshold profile to enforce. Defaults to WCAG 2.2 AA. */
+  policy?: string;
+  
   /** Hard stop, so a loop that cannot converge cannot run forever. */
   maxIterations: number;
   /** When true, patches are computed and shown but never written to disk. */
