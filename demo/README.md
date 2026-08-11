@@ -19,9 +19,16 @@ python -m kintsugi --source demo/fixture --llm-mock demo/proposals.json --budget
 # 3. Audit the newest trace
 kintsugi --trace <traceId>   # with the same LANGFUSE_* env
 
-# 4. Render the trace in a browser
-open http://127.0.0.1:8787/?trace=<traceId>
+# 4. Open the observability dashboard (runs list, timeline, cost tables)
+open http://127.0.0.1:8787/
 ```
+
+The dashboard (`/`) lists every traced run with its status and cost, and
+drills into each trace: stat cards (cost, tokens, model calls, attempts),
+a phase timeline (observe → propose → verify → settle) with expandable
+payloads, the ledger-joined attempts table, and the per-finding cost
+table with input/output token bars. Deep-link any trace at
+`/?trace=<traceId>`.
 
 The fixture (`demo/fixture/src/tax.py`) is **deliberately broken** —
 `apply_tax` ignores its rate so `assert apply_tax(100) == 10` fails.
