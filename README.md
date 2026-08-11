@@ -47,12 +47,16 @@ npm install && cd fixture && npm install      # once
 npm run demo                                  # watch it repair a broken package, keyless
 ```
 
-Point it at a real repo:
+Point it at a real repo — from anywhere, once the skill is installed:
 
 ```bash
-npm run cli -- --source <your-repo> --dry     # survey: what WOULD it fix? writes nothing
-npm run cli -- --source <your-repo>           # rules-only, every patch verified
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo> --dry   # survey: what WOULD it fix? writes nothing
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo>         # rules-only, every patch verified
 ```
+
+The script locates or bootstraps the engine (one-time clone + install at
+`~/.kintsugi/engine`) and resolves relative paths against your repo, so it
+works from any working directory against any codebase.
 
 Exit code `0` when nothing actionable remains, `1` while defects do — so it
 gates a pipeline. `--quarantined-ok` treats quarantine (a human decision)
@@ -68,6 +72,14 @@ cp -r skills/kintsugi ~/.claude/skills/kintsugi
 Claude Code (or any agent that reads skills) then knows the loop exists,
 loads the instructions when checks fail, and runs the bundled engine via
 `scripts/run-loop.sh`. The skill is progressive-disclosure shaped: ~100
+
+Install the fleet too — the loop's roles (observer, healer, critic,
+verifier) ship as Claude Code subagents:
+
+```bash
+mkdir -p ~/.claude/agents
+cp -r .claude/agents/kintsugi-*.md ~/.claude/agents/
+```
 tokens of frontmatter until a failing check triggers it.
 
 ## Any check becomes an observation

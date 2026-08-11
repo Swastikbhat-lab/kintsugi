@@ -99,7 +99,11 @@ export class Ledger {
     // Once we have run out of candidate patches there is nothing left to
     // learn by looping again — the next pass would propose the same empty
     // set. Quarantine immediately rather than burning the iteration budget.
-    if (tried.some((a) => a.patch.id === 'none')) return true;
+    // Only a *provider-backed* dead end counts: a rules-only run records
+    // `patch.id === 'none'` for findings no mechanical rule reaches, which
+    // proves nothing about what a model could propose — it must not blind
+    // a later run that has a model configured.
+    if (tried.some((a) => a.patch.id === 'none' && a.provider)) return true;
     return tried.length >= limit && !tried.some((a) => a.outcome === 'committed');
   }
 

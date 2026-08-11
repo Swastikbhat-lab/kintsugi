@@ -1,0 +1,9 @@
+{
+  "checks": [
+    { "name": "typecheck", "command": "npm run typecheck", "parser": "tsc", "severity": "major" },
+    { "name": "test", "command": "npx tsx --test --test-reporter=tap test/*.test.ts", "parser": "tap", "severity": "blocker" }
+  ],
+  "budget": 2,
+  "maxIterations": 12,
+  "allowShared": false
+}

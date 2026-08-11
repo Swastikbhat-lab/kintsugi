@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTsc, parseTap, parseLines } from '../src/parsers.js';
+import { resolve } from 'node:path';
+import { parseTsc, parseTap, parseLines, parseSpec } from '../src/parsers.js';
 
 const CWD = '/repo';
 
@@ -69,10 +70,15 @@ test('tap parser handles per-file TAP blocks', () => {
 });
 
 test('tap parser reads the location field when there is no stack line', () => {
+  // A real `location:` field carries an absolute path inside the source root
+  // — as the OS spells it. Deriving it from the resolved CWD keeps this test
+  // green on Windows (C:/repo/…) and POSIX (/repo/…) alike; a hardcoded
+  // `C:/repo/…` silently failed on Linux CI.
+  const root = resolve(CWD).replace(/\\/g, '/');
   const out = [
     'not ok 1 - applyTax applies the 10% tax rate',
     '  ---',
-    "  location: 'C:/repo/test/pricing.test.ts:6:1'",
+    `  location: '${root}/test/pricing.test.ts:6:1'`,
     '  failureType: testCodeFailure',
     '  ...',
   ].join('\n');
@@ -80,6 +86,49 @@ test('tap parser reads the location field when there is no stack line', () => {
   assert.equal(f.summary, 'applyTax applies the 10% tax rate');
   assert.equal(norm(f.file), '/repo/test/pricing.test.ts');
   assert.equal(f.line, 6);
+});
+
+test('spec parser reads a failing test and its stack location', () => {
+  const out = [
+    '✔ a passing test (1.2ms)',
+    '✖ the loop repairs five defect classes and quarantines the sixth (12774.48ms)',
+    'ℹ tests 2',
+    'ℹ pass 1',
+    'ℹ fail 1',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at test\\loop.test.ts:9:1',
+    '✖ the loop repairs five defect classes and quarantines the sixth (12774.48ms)',
+    '  AssertionError [ERR_ASSERTION]: expected 5 committed, got: []',
+    '  ',
+    '      at TestContext.<anonymous> (file:///repo/test/loop.test.ts:31:10)',
+  ].join('\n');
+  const f = parseSpec(out, CWD, 'test');
+
+  assert.equal(f.length, 1);
+  assert.equal(f[0].severity, 'blocker');
+  assert.equal(f[0].summary, 'the loop repairs five defect classes and quarantines the sixth');
+  assert.equal(norm(f[0].file), '/repo/test/loop.test.ts');
+  assert.equal(f[0].line, 31);
+});
+
+test('spec parser skips the summary heading and dedupes repeated titles', () => {
+  const out = [
+    '✖ a fails on windows paths (5ms)',
+    'ℹ fail 1',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at test\\parsers.test.ts:71:1',
+    '✖ a fails on windows paths (5ms)',
+    '  Error: boom',
+    '      at file:///repo/test/parsers.test.ts:73:5',
+  ].join('\n');
+  const f = parseSpec(out, CWD, 'test');
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/test/parsers.test.ts');
+  assert.equal(f[0].line, 73);
 });
 
 test('lines parser separates file-prefixed lines from plain messages', () => {

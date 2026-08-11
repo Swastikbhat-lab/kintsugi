@@ -69,6 +69,13 @@ export interface Attempt {
   at: string;
   /** Findings that appeared as a direct result of this patch. */
   collateral: string[];
+  /**
+   * Whether a model/mock proposer was available when this attempt was
+   * recorded. A rules-only run records `patch.id === 'none'` for findings
+   * no mechanical rule reaches — that proves nothing about what a model
+   * could propose, so it must not permanently exhaust the finding.
+   */
+  provider?: boolean;
 }
 
 // ------------------------------------------------------------- checks

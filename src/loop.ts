@@ -54,6 +54,8 @@ export class Loop {
   private provider: Provider | null = null;
   /** HEAD before the run, so the final report can list only our commits. */
   private gitBase: string | null = null;
+  /** Findings with no untried candidates, quarantined for THIS run only. */
+  private quarantinedThisRun = new Set<string>();
 
   constructor(private config: RunConfig, private emit: Emit) {
     this.state = {
@@ -212,7 +214,15 @@ export class Loop {
       run: async ({ deps, emit }) => {
         const { findings } = deps.reduce as { findings: Finding[] };
         const actionable = findings
-          .filter((f) => !this.ledger.isExhausted(f))
+          .filter(
+            (f) =>
+              !this.ledger.isExhausted(f) &&
+              // Within one run, a finding with no untried candidates is
+              // quarantined for this run — but only the ledger decides
+              // whether that is permanent. Without this, a rules-only run
+              // would re-target the same dead end every iteration.
+              !this.quarantinedThisRun.has(f.fingerprint),
+          )
           .sort(bySeverity);
 
         const quarantined = findings.length - actionable.length;
@@ -319,6 +329,7 @@ export class Loop {
 
         if (!candidates.length) {
           emit('No untried patch available for this finding — quarantining for a human');
+          this.quarantinedThisRun.add(target.fingerprint);
           this.record(target, null, 'unverifiable', []);
           return { settled: false };
         }
@@ -477,6 +488,7 @@ export class Loop {
       outcome,
       at: new Date().toISOString(),
       collateral,
+      provider: !!this.provider,
     };
     this.ledger.record(attempt);
     this.state.attempts.push(attempt);

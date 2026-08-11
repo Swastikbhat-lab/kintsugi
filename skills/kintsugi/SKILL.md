@@ -19,8 +19,17 @@ observe → diagnose → repair → verify → settle
 
 ## Quick start
 
-The engine ships in this repo. Run it, or drive the loop by hand — the
-instructions below are what the engine implements.
+The engine ships in this repo and boots itself. From **any** repo, with this
+skill installed:
+
+```bash
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --dry   # survey, write nothing
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source .         # repair
+```
+
+The script locates (or bootstraps) the engine at `~/.kintsugi/engine` and
+resolves relative paths against the repo you run it from. In the engine repo
+itself:
 
 ```bash
 npm install                          # once
@@ -61,6 +70,27 @@ Against a real repo with failing checks, the five phases are:
   `fingerprint → patch → outcome`. A patch shape that failed once is never
   tried again; a finding with no untried candidates left is quarantined,
   not looped on.
+
+## The fleet (agents)
+
+Each iteration deploys a multi-agent work graph. The engine runs it in
+-process; the same roles also ship as Claude Code subagents (`.claude/agents/`
+in this repo, installed user-wide at `~/.claude/agents/`) for driving the
+loop by hand:
+
+- **kintsugi-observer** — one per check, concurrent: run the check, report
+  typed findings, never invent a failure, never call a crash a defect.
+- **kintsugi-healer** — the only creative step: smallest exact-string repair,
+  mechanical rules first, model reasoning for the rest; blast radius decided
+  before the patch.
+- **kintsugi-critic** — several in parallel, each with a fresh context:
+  independent keep/reject vote on a candidate patch.
+- **kintsugi-verifier** — strictly serial tail: apply, re-run the checks,
+  keep only if the finding is gone and nothing new appeared; otherwise
+  revert, byte-for-byte.
+
+The majority of critics decides; the verifier is the gate; the ledger makes
+repetition safe. See GRAPH.md for the topology.
 
 ## What it refuses to do
 

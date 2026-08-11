@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { CheckDef, CheckResult } from './types.js';
-import { parseTsc, parseTap, parseLines } from './parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec } from './parsers.js';
 
 /**
  * Run one check command and turn its output into findings.
@@ -58,7 +58,7 @@ export function runCheck(
       // Crash means *no typed output at all* — a broken harness. Exit non-zero
       // with parseable findings is a defect, even when the filter below drops
       // every one of them (another check owns that defect class).
-      const parsed = code === 0 ? [] : parse(def, output, cwd);
+      const parsed = code === 0 ? [] : parseWithFallback(def, output, cwd);
       // A check owns its defect class: tsc-based lint only keeps the codes
       // it was configured for, so the same type error is not reported twice
       // by two checks and repaired (or quarantined) twice.
@@ -82,5 +82,22 @@ function parse(def: CheckDef, output: string, cwd: string) {
     case 'tsc': return parseTsc(output, cwd, def.name);
     case 'tap': return parseTap(output, cwd, def.name);
     case 'lines': return parseLines(output, cwd, def.name);
+    default: return [];
   }
+}
+
+/**
+ * A check that exits non-zero must still speak in typed findings. A repo
+ * whose `npm test` runs `tsx --test` without a reporter emits *spec*
+ * output (✔/✖) when piped on newer Node — indistinguishable from a crash
+ * to a TAP-only parser. If the declared parser yields nothing but the
+ * output is clearly spec-shaped, parse it as spec: a failing test is a
+ * defect, never a broken harness.
+ */
+function parseWithFallback(def: CheckDef, output: string, cwd: string) {
+  const parsed = parse(def, output, cwd);
+  if (parsed.length === 0 && /^[✔✖ℹ]/m.test(output)) {
+    return parseSpec(output, cwd, def.name);
+  }
+  return parsed;
 }

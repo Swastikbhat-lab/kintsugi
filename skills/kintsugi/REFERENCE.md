@@ -17,7 +17,9 @@
 
 No config file? The engine derives defaults from the repo's own
 `package.json` scripts: `typecheck` (tsc parser) and `test` (tap parser), if
-they exist. Zero-config for an npm repo.
+they exist. Zero-config for an npm repo. The kintsugi repo itself ships a
+`kintsugi.config.json` pinning `--test-reporter=tap` so its own test check
+speaks TAP on every platform.
 
 ### Parsers
 
@@ -25,10 +27,14 @@ they exist. Zero-config for an npm repo.
 |---|---|---|
 | `tsc` | `file(line,col): error TSxxxx: message` | `TS2307: Cannot find module './shipping-costs'` |
 | `tap` | Node test-runner TAP | `not ok 2 - applyTax applies the 10% tax rate` |
+| `spec` | Node test-runner spec output (`✔`/`✖`) | `✖ the loop repairs five defect classes (12774ms)` |
 | `lines` | one `path: message` (or bare `message`) per line | `README.md: version 0.1.0 does not match 0.2.0` |
 
 A check that exits non-zero with no parseable finding is a **crash** — the
-loop reports it and never heals it.
+loop reports it and never heals it. One exception is built in: if the
+declared parser yields nothing but the output is clearly spec-shaped
+(`✔`/`✖`), it is parsed as spec — a repo whose `npm test` omits the tap
+reporter is a repo with failing tests, never a broken harness.
 
 ## Findings
 
@@ -64,9 +70,16 @@ applied; `shared` (≥2 importers) is escalated with the count unless
 
 Lives in `~/.kintsugi/ledgers/<hash>.json`, keyed by source root — never
 inside the repo under audit. Every attempt is `fingerprint → patch →
-outcome` (`committed | ineffective | regressed | unverifiable`). The loop
-tries committed patch shapes first, never re-proposes a disproved shape, and
-quarantines a finding with no untried candidates.
+outcome` (`committed | ineffective | regressed | unverifiable`) plus
+`provider` (whether a model/mock was available). The loop tries committed
+patch shapes first, never re-proposes a disproved shape, and quarantines a
+finding with no untried candidates.
+
+Only a **provider-backed** dead end is permanent: a rules-only run records
+`patch.id === 'none'` for findings no mechanical rule reaches, which proves
+nothing about what a model could propose — so a later run with a model
+configured retries them instead of staying blind. Run keyless first, add a
+model key later: nothing learned is lost, nothing provable is skipped.
 
 ## CLI
 

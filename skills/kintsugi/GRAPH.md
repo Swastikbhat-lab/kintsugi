@@ -5,6 +5,10 @@ unit of work with one defined input and one defined output; an edge is a
 genuine dependency — the next node consumes what the previous one produced.
 Anything without an incoming edge starts immediately.
 
+The roles — observer, healer, critic, verifier — ship as Claude Code
+subagents (`.claude/agents/kintsugi-*.md`, also installed user-wide) so the
+graph can be driven by hand; the engine runs the same graph in-process.
+
 ```
 observe(test)  observe(typecheck)  observe(lint)  ← independent → concurrent
         └──────────────┬──────────────┘

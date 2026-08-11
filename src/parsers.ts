@@ -18,6 +18,14 @@ const SKIP = /(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/;
  * Returns forward-slash absolute paths so the rest of the engine never has
  * to care which OS produced them.
  */
+function isAbsPath(p: string): boolean {
+  // `C:/…` is absolute on Windows — and tool output can carry Windows paths
+  // on any OS, so treat a drive-letter prefix as absolute everywhere. Without
+  // this, a `C:/…` path is joined under the source root on POSIX and becomes
+  // a phantom finding (or, worse, passes the outside-root check).
+  return isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p);
+}
+
 function normalizePath(p: string, cwd: string): string | undefined {
   const cleaned = p.trim().replace(/\\/g, '/');
   if (!cleaned) return undefined;
@@ -29,9 +37,9 @@ function normalizePath(p: string, cwd: string): string | undefined {
   if (cleaned.startsWith('file://')) {
     let rest = cleaned.slice('file://'.length);
     if (/^\/[A-Za-z]:/.test(rest)) rest = rest.slice(1);
-    abs = isAbsolute(rest) ? rest : resolve(cwd, rest);
+    abs = isAbsPath(rest) ? rest : resolve(cwd, rest);
   } else {
-    abs = isAbsolute(cleaned) ? cleaned : resolve(cwd, cleaned);
+    abs = isAbsPath(cleaned) ? cleaned : resolve(cwd, cleaned);
   }
   abs = abs.replace(/\\/g, '/');
 
@@ -145,6 +153,92 @@ export function parseTap(output: string, cwd: string, check: string): Finding[] 
       summary: title,
       file,
       line,
+      evidence: { title },
+    });
+  }
+  return findings;
+}
+
+// ------------------------------------------------------------- spec
+
+/**
+ * Node's built-in test runner in *spec* reporter form (`✔`/`✖`), which is
+ * what `node --test` / `tsx --test` emit when stdout is piped on newer
+ * Node. A failing test is a line `✖ <title> (Xms)`; the failure details
+ * (error message and a stack with the real file:line) appear in the
+ * trailing "✖ failing tests:" block:
+ *
+ *   ✖ the loop repairs five defect classes (12774ms)
+ *   ℹ tests 1 …
+ *   ✖ failing tests:
+ *
+ *   test at test\loop.test.ts:9:1
+ *   ✖ the loop repairs five defect classes (12774ms)
+ *     AssertionError [ERR_ASSERTION]: expected 5 committed, got: []
+ *         at TestContext.<anonymous> (C:\…\test\loop.test.ts:31:10)
+ */
+export function parseSpec(output: string, cwd: string, check: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = output.split('\n');
+  const titleRe = /^✖\s+(.+?)(?:\s*\(\d+(?:\.\d+)?ms\))?\s*$/;
+  // The stack `at` line may be `at <fn> (file:///abs/path.ts:12:3)` or
+  // `at <fn> (C:\abs\path.ts:12:3)`; anchor at end so the capture always
+  // ends at the final `:line:col`. Parens and `file://` prefixes are then
+  // stripped from the captured path.
+  const atRe = /^\s*at\s+(.+?):(\d+):(\d+)\)?$/;
+  const testAtRe = /^test at\s+(.+?):(\d+):(\d+)/;
+
+  // Collect every ✖ occurrence with whatever location each block carries,
+  // then keep the best (stack-backed, file-known) per unique title — the
+  // summary block repeats titles with the real locations attached.
+  const blocks: { title: string; file?: string; line?: number; fromStack: boolean }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(titleRe);
+    if (!m) continue;
+    const title = m[1].trim();
+    if (!title || title === 'failing tests:') continue;
+
+    let file: string | undefined;
+    let line: number | undefined;
+    let fromStack = false;
+    for (let j = i + 1; j < Math.min(i + 40, lines.length); j++) {
+      const at = lines[j].match(atRe);
+      if (at) {
+        const cap = at[1];
+        const cut = Math.max(cap.lastIndexOf('('), cap.indexOf('file://'));
+        const path = cut >= 0 ? cap.slice(cut).replace(/^\(/, '') : cap;
+        file = normalizePath(path, cwd);
+        line = Number(at[2]);
+        fromStack = true;
+        break;
+      }
+      const t = lines[j].match(testAtRe);
+      if (t) {
+        file = normalizePath(t[1], cwd);
+        line = Number(t[2]);
+        break;
+      }
+      // Next reporter line without a location — stop hunting this block.
+      if (j > i + 1 && /^[✔✖ℹ]/.test(lines[j])) break;
+    }
+    blocks.push({ title, file, line, fromStack });
+  }
+
+  const best = new Map<string, { file?: string; line?: number }>();
+  for (const b of blocks) {
+    const cur = best.get(b.title);
+    if (!cur || (!cur.file && b.file) || (!cur.file && b.fromStack)) {
+      best.set(b.title, { file: b.file, line: b.line });
+    }
+  }
+  for (const [title, loc] of best) {
+    findings.push({
+      fingerprint: fingerprint(check, loc.file, '', title),
+      check,
+      severity: 'blocker',
+      summary: title,
+      file: loc.file,
+      line: loc.line,
       evidence: { title },
     });
   }

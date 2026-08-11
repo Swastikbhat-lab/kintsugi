@@ -42,7 +42,7 @@ test('a committed patch is prioritised on the next encounter', () => {
   assert.equal(ordered[0].replace, 'b');
 });
 
-test('a finding with no candidate patches is quarantined immediately', () => {
+test('a finding with no candidate patches is quarantined immediately (model-backed)', () => {
   const l = ledger();
   l.record({
     fingerprint: fp,
@@ -50,8 +50,24 @@ test('a finding with no candidate patches is quarantined immediately', () => {
     outcome: 'unverifiable',
     at: 't',
     collateral: [],
+    provider: true,
   });
   assert.equal(l.isExhausted(finding), true);
+});
+
+test('a rules-only dead end never blinds a later model run', () => {
+  const l = ledger();
+  // Rules-only run: no provider, so `patch.id === 'none'` is recorded without
+  // the provider flag — the finding must stay actionable for a future run
+  // that has a model configured.
+  l.record({
+    fingerprint: fp,
+    patch: { id: 'none', file: '', find: '', replace: '', rationale: 'no candidate', scope: 'local' },
+    outcome: 'unverifiable',
+    at: 't',
+    collateral: [],
+  });
+  assert.equal(l.isExhausted(finding), false);
 });
 
 test('repeated failures exhaust a finding', () => {
