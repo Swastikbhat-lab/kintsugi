@@ -1,6 +1,6 @@
 # Kintsugi fixture
 
-A deliberately-broken package the loop repairs. Version 0.2.0.
+A deliberately-broken package the loop repairs. Version 0.1.0.
 
 The planted defects, one per check domain:
 

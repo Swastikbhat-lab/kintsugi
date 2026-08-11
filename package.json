@@ -16,7 +16,8 @@
     "test": "tsx --test test/parsers.test.ts test/ledger.test.ts test/imports.test.ts test/propose.test.ts test/loop.test.ts",
     "demo": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-demo/state.json --quarantined-ok",
     "demo:dry": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --dry",
-    "demo:ci": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-ci/state.json --quarantined-ok"
+    "demo:ci": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-ci/state.json --quarantined-ok",
+    "demo:reset": "git checkout -- fixture && rm -rf .kintsugi-demo .kintsugi-ci"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0"
