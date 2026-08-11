@@ -111,7 +111,10 @@ def main(argv=None):
     summary = summarise(state, loop.actionable_remaining())
 
     if args.get("json"):
-        print(json.dumps(report_json(summary, source_root), indent=2))
+        # Raw UTF-8, not \u escapes: the TS engine's JSON.stringify emits
+        # non-ASCII as UTF-8 bytes, and stdout is reconfigured to UTF-8
+        # above — so the machine report is byte-identical across engines.
+        print(json.dumps(report_json(summary, source_root), indent=2, ensure_ascii=False))
     else:
         lines = summary_lines(summary, source_root)
         print("\n  " + "\n  ".join(lines) + "\n")

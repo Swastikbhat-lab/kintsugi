@@ -111,7 +111,10 @@ under a plain `python` interpreter. `run-loop.sh` picks it automatically
 (or set `KINTSUGI_RUNNER=python|node`); invoke it directly with
 `python -m kintsugi --source <repo>` from `py/`. The two engines share the
 same ledger format, report shape, and exit-code contract, so a repo audited
-by both keeps one memory.
+by both keeps one memory. That interchangeability is enforced by a CI
+regression test (`py/tests/test_parity.py`) that runs *both* engines on the
+same fixture and asserts identical fingerprints, reports, and exit codes,
+plus one shared ledger across engines.
 
 Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing — a default check that crashes on
