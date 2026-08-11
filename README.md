@@ -215,7 +215,10 @@ remembers — and quarantines the sixth. The evidence from a real run is in
 ## Observability
 
 Set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (optionally
-`LANGFUSE_HOST`, default `https://cloud.langfuse.com`) and the loop traces
+`LANGFUSE_HOST`; default `https://us.cloud.langfuse.com` — use
+`https://eu.cloud.langfuse.com` for EU projects, since the legacy
+`cloud.langfuse.com` host rejects valid keys with a misleading 401) and
+the loop traces
 itself to Langfuse, mirroring the ledger's structure: one trace per run;
 `observe`/`verify`/`settle` spans; and per-attempt `verify` spans carrying
 the same fingerprint, patch shape, outcome, collateral, and provider fields
@@ -232,6 +235,12 @@ history by fingerprint, and prints a per-finding cost table
 (fingerprint, finding, outcome, input/output tokens, cost) plus a total.
 Multiple model calls for one finding accumulate into its row, and the
 same prices used at trace time produce the same costs.
+
+**The host matters too** — Langfuse now runs regional clouds and the
+legacy `cloud.langfuse.com` 401s even valid keys. Kintsugi defaults to
+the US regional host and honors `LANGFUSE_HOST` everywhere (the TS
+client's own env var, `LANGFUSE_BASE_URL`, is deliberately ignored in
+favor of the same contract both engines share).
 
 **The SDK version matters — get this right or tracing silently no-ops.**
 The tracer and the audit module each speak one specific `langfuse` API,

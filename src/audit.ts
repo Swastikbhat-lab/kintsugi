@@ -56,10 +56,12 @@ export async function auditTrace(
 ): Promise<AuditResult> {
   let observations: any;
   try {
+    // The real API caps `limit` at 100 (the mock accepted 1000); a single
+    // run's trace never approaches that, so one page suffices.
     observations = await client.api._observations.getMany({
       traceId,
       type: undefined,
-      limit: 1000,
+      limit: 100,
       fields: 'core,basic,usage',
     });
   } catch {
@@ -154,7 +156,13 @@ export async function createAuditClient(): Promise<{ api: { _observations: any }
   if (!process.env.LANGFUSE_PUBLIC_KEY || !process.env.LANGFUSE_SECRET_KEY) return null;
   try {
     const { LangfuseClient } = await import('@langfuse/client');
-    return new LangfuseClient() as any;
+    // Honor the same LANGFUSE_HOST contract as the tracer and the py engine
+    // (the client's own env var is LANGFUSE_BASE_URL, which our docs don't
+    // use). Default to the current US regional host — the legacy
+    // cloud.langfuse.com rejects valid keys with a confusing 401.
+    return new LangfuseClient({
+      baseUrl: process.env.LANGFUSE_HOST ?? 'https://us.cloud.langfuse.com',
+    }) as any;
   } catch {
     return null;
   }

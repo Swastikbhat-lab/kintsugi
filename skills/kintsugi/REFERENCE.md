@@ -117,8 +117,10 @@ applied; `shared` (≥2 importers) is escalated with the count unless
 ## Observability (optional)
 
 Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` (plus optionally
-`LANGFUSE_HOST`, `KINTSUGI_INPUT_PRICE`, `KINTSUGI_OUTPUT_PRICE`) and the
-loop emits one Langfuse trace per run — a span per check observation, a
+`LANGFUSE_HOST` — default `https://us.cloud.langfuse.com`, use
+`https://eu.cloud.langfuse.com` for EU projects; the legacy
+`cloud.langfuse.com` rejects valid keys — plus `KINTSUGI_INPUT_PRICE`,
+`KINTSUGI_OUTPUT_PRICE`) and the loop emits one Langfuse trace per run — a span per check observation, a
 `generation` per model call with the *reported* token usage (never a guess)
 and the derived cost, and a span per verify. Without keys, or without the
 `langfuse` SDK installed, the tracer is inert: telemetry can never take the

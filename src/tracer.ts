@@ -32,7 +32,7 @@ export class Tracer {
       tracer.client = new Langfuse({
         publicKey: process.env.LANGFUSE_PUBLIC_KEY,
         secretKey: process.env.LANGFUSE_SECRET_KEY,
-        host: process.env.LANGFUSE_HOST ?? 'https://cloud.langfuse.com',
+        host: process.env.LANGFUSE_HOST ?? 'https://us.cloud.langfuse.com',
       });
     } catch {
       // SDK not installed — telemetry is optional.

@@ -64,7 +64,7 @@ def audit_trace(client, trace_id: str) -> dict:
     try:
         obs = client.api.observations.get_many(
             trace_id=trace_id,
-            limit=1000,
+            limit=100,
         )
     except Exception:
         return {"status": "error", "message": "failed to query Langfuse observations"}
@@ -170,7 +170,7 @@ def create_audit_client():
         return Langfuse(
             public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
             secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-            host=os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+            host=os.environ.get("LANGFUSE_HOST", "https://us.cloud.langfuse.com"),
         )
     except Exception:
         return None
