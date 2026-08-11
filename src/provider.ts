@@ -56,6 +56,9 @@ interface MockEntry {
 export class MockProvider implements Provider {
   readonly name = 'mock';
   private entries: MockEntry[];
+  /** Replayed proposals can declare usage — keyless runs exercise the same
+   * audit/cost path a real model call would. */
+  lastUsage: { inputTokens?: number; outputTokens?: number } | null = null;
 
   constructor(path: string) {
     this.entries = JSON.parse(readFileSync(resolve(path), 'utf8'));
@@ -76,6 +79,7 @@ export class MockProvider implements Provider {
     if (!entry) return [];
 
     const root = resolve(sourceRoot);
+    this.lastUsage = (entry as any).usage ?? null;
     return entry.candidates
       .filter((c) => {
         const abs = resolve(root, c.file);

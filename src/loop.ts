@@ -11,7 +11,8 @@ import { buildImportGraph, scopeOf } from './imports.js';
 import { byRisk, suppressFindings } from './risk.js';
 import { applyEdits } from './patch.js';
 import { createProvider, CRITIC_QUESTIONS, type Provider } from './provider.js';
-import { Tracer } from './tracer.js';
+import { Tracer, costUsd } from './tracer.js';
+import { AuditLog } from './audit_log.js';
 import { execute, type WorkNode } from './graph.js';
 import { inspect, useBranch, commitFile, logSince, head } from './git.js';
 
@@ -55,6 +56,8 @@ export class Loop {
   private ledger: Ledger;
   private provider: Provider | null = null;
   private tracer: Tracer = new Tracer();
+  private auditLog: AuditLog;
+  private usageByFingerprint: Map<string, { input: number; output: number }>;
   /** HEAD before the run, so the final report can list only our commits. */
   private gitBase: string | null = null;
   /** Findings with no untried candidates, quarantined for THIS run only. */
@@ -71,6 +74,10 @@ export class Loop {
       startedAt: new Date().toISOString(),
     };
     this.ledger = new Ledger(config.statePath ?? ledgerPathFor(config.sourceRoot));
+    this.auditLog = new AuditLog(config.auditLog ?? null, costUsd);
+    // Real token usage per fingerprint, accumulated across model calls, so
+    // the audit trail's cost mirrors what the tracer reported.
+    this.usageByFingerprint = new Map<string, { input: number; output: number }>();
   }
 
   get snapshot(): RunState {
@@ -155,6 +162,25 @@ export class Loop {
       this.state.status = 'failed';
       this.say('settle', `Run failed: ${(err as Error).message}`);
     } finally {
+      // The run's final NDJSON line: totals that reconcile the attempt
+      // lines above (same usage, same prices).
+      let totals = { input: 0, output: 0 };
+      for (const v of this.usageByFingerprint.values()) {
+        totals.input += v.input;
+        totals.output += v.output;
+      }
+      const attempts = this.state.attempts;
+      this.auditLog.summary({
+        runId: this.state.id,
+        status: this.state.status,
+        iterations: this.state.iteration,
+        committed: attempts.filter((a) => a.outcome === 'committed').length,
+        reverted: attempts.filter((a) => a.outcome === 'regressed' || a.outcome === 'unverifiable').length,
+        quarantined: attempts.filter((a) => a.outcome === 'unverifiable').length,
+        usage: totals,
+      });
+      this.auditLog.close();
+
       // A final settle span mirroring the ledger's attempt records — one
       // entry per attempt with the same outcome vocabulary — so the trace
       // and the ledger tell the same story and are joinable on
@@ -302,11 +328,18 @@ export class Loop {
           try {
             candidates = await this.provider.propose(target, sourceRoot);
             emit(`${this.provider.name} proposed ${candidates.length} candidate(s)`);
+            const usage = (this.provider as any)?.lastUsage ?? {};
             this.tracer.generation(
               'propose',
-              (this.provider as any)?.lastUsage ?? null,
+              usage,
               { fingerprint: target.fingerprint, check: target.check, candidates: candidates.length },
             );
+            // Local audit trail needs the same numbers, even when no
+            // Langfuse is configured.
+            const acc = this.usageByFingerprint.get(target.fingerprint) ?? { input: 0, output: 0 };
+            acc.input += Number(usage.inputTokens ?? 0) || 0;
+            acc.output += Number(usage.outputTokens ?? 0) || 0;
+            this.usageByFingerprint.set(target.fingerprint, acc);
           } catch (err) {
             emit(`Model proposer failed: ${(err as Error).message}`);
           }
@@ -560,6 +593,20 @@ export class Loop {
     };
     this.ledger.record(attempt);
     this.state.attempts.push(attempt);
+    // One structured line per attempt — the local audit trail, with the
+    // real token usage of the model calls made for this finding.
+    const usage = this.usageByFingerprint.get(finding.fingerprint) ?? { input: 0, output: 0 };
+    this.auditLog.attempt({
+      fingerprint: finding.fingerprint,
+      outcome,
+      check: finding.check,
+      code: finding.code ?? '',
+      rationale: attempt.patch?.rationale ?? '',
+      provider: !!this.provider,
+      collateral,
+      usage,
+      runId: this.state.id,
+    });
   }
 }
 

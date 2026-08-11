@@ -123,6 +123,9 @@ class MockProvider:
                 self.entries = json.load(fh)
         except Exception as err:
             raise ValueError(f"--llm-mock {path} is not readable: {err}") from err
+        # Replayed proposals can declare the token usage a real model would
+        # have reported, so keyless runs exercise the same audit/cost path.
+        self.last_usage = None
 
     def _matches(self, finding: dict):
         for entry in self.entries:
@@ -156,6 +159,7 @@ class MockProvider:
                 "rationale": f"{c['rationale']} [proposed by mock]",
                 "scope": "local",
             })
+        self.last_usage = entry.get("usage") or None
         return out
 
 

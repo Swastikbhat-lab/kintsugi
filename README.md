@@ -232,6 +232,15 @@ history by fingerprint, and prints a per-finding cost table
 Multiple model calls for one finding accumulate into its row, and the
 same prices used at trace time produce the same costs.
 
+**Audit locally, no service needed** — `kintsugi --audit-log <path>`
+appends one NDJSON line per repair attempt (fingerprint, outcome,
+check/code, patch rationale, provider, and the real token usage + cost
+of the model calls made for that finding) plus a final summary line
+with the run totals. Read it with any JSONL tool, or turn it into a
+table with `jq -s`. The same usage numbers feed both this file and the
+Langfuse trace, so they reconcile. Without the flag nothing extra is
+written; a bad path degrades with one stderr note, never a crash.
+
 ## The point
 
 Auto-fixers fail one way that matters more than all others: they apply

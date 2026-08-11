@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ from functools import cmp_to_key
 import pytest
 
 from kintsugi.audit import audit_trace, print_audit
+from kintsugi.audit_log import AuditLog
 from kintsugi.config import default_checks
 from kintsugi.parsers import parse_radon
 from kintsugi.patch import apply_edits
@@ -367,6 +369,69 @@ def test_audit_reports_no_trace_and_tolerates_missing_settle():
     no_settle = audit_trace(_FakeAuditClient([{"name": "observe", "type": "SPAN", "input": {}}]), "t")
     assert no_settle["status"] == "ok" and no_settle["rows"] == []
     assert "no kintsugi attempt history" in print_audit(no_settle, cost_usd)
+
+
+# ------------------------------------------------------------- audit log (NDJSON)
+
+def test_audit_log_writes_one_line_per_attempt_plus_a_reconciling_summary(tmp_path):
+    path = str(tmp_path / "audit.jsonl")
+    log = AuditLog(path, cost_usd)
+    log.attempt(fingerprint="fp1", outcome="committed", check="py:test",
+                rationale="rate 0.1", provider=True, collateral=[],
+                input_tokens=1500, output_tokens=700, run_id="run1")
+    log.attempt(fingerprint="fp2", outcome="quarantined", check="py:bandit",
+                input_tokens=0, output_tokens=0, run_id="run1")
+    log.summary(run_id="run1", status="converged", iterations=2,
+                committed=1, reverted=0, quarantined=1,
+                total_input=1500, total_output=700)
+    log.close()
+
+    lines = [json.loads(l) for l in open(path, encoding="utf-8").read().strip().split("\n")]
+    assert len(lines) == 3
+    assert lines[0]["event"] == "attempt" and lines[0]["fingerprint"] == "fp1"
+    assert lines[0]["outcome"] == "committed"
+    assert lines[0]["usage"] == {"input": 1500, "output": 700}
+    # 1500/1M * $5 + 700/1M * $25 = 0.0075 + 0.0175 = 0.025
+    assert lines[0]["costUsd"] == pytest.approx(0.025)
+    assert lines[1]["outcome"] == "quarantined"
+    assert lines[2]["event"] == "summary" and lines[2]["committed"] == 1
+    assert lines[2]["costUsd"] == pytest.approx(0.025)
+
+
+def test_audit_log_without_a_path_is_a_noop_and_bad_paths_do_not_raise(tmp_path):
+    noop = AuditLog(None, cost_usd)
+    assert noop.active is False
+    noop.attempt(fingerprint="f", outcome="committed")
+    noop.summary(run_id="r")
+    noop.close()  # must not throw
+
+    bad = AuditLog(str(tmp_path), cost_usd)  # a directory — cannot be opened
+    assert bad.active is False
+    bad.attempt(fingerprint="f", outcome="committed")
+    bad.close()
+
+
+def test_mock_provider_reports_replayed_usage(tmp_path):
+    from kintsugi.provider import MockProvider
+
+    props = tmp_path / "props.json"
+    props.write_text(json.dumps([{
+        "match": {"check": "py:test", "contains": "assert 100 == 10"},
+        "candidates": [{"file": "tax.py", "find": "return amount",
+                         "replace": "return amount * 0.1", "rationale": "rate"}],
+        "usage": {"inputTokens": 1500, "outputTokens": 700},
+    }]), encoding="utf-8")
+    root = str(tmp_path / "repo")
+    os.makedirs(root)
+    open(os.path.join(root, "tax.py"), "w", newline="").write("return amount\n")
+
+    provider = MockProvider(str(props))
+    patches = provider.propose({
+        "check": "py:test", "summary": "assert 100 == 10",
+        "fingerprint": "f", "severity": "minor", "evidence": {},
+    }, root)
+    assert len(patches) == 1
+    assert provider.last_usage == {"inputTokens": 1500, "outputTokens": 700}
 
 
 # ------------------------------------------------------------- discovery

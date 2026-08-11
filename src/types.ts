@@ -144,6 +144,8 @@ export interface RunConfig {
   allowShared: boolean;
   /** Ledger path override (defaults to ~/.kintsugi/ledgers/<key>.json). */
   statePath?: string;
+  /** Append one NDJSON line per repair attempt plus a run summary. */
+  auditLog?: string;
   /** Replay canned proposals instead of calling a model (demo, tests). */
   llmMock?: string;
   /** Commit each verified patch on a branch of its own. */

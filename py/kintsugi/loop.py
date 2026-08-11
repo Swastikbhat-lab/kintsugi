@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cmp_to_key
 
 from .checks import run_check
+from .audit_log import AuditLog
 from .git import commit_file, head, inspect, use_branch
 from .imports import build_import_graph, scope_of
 from .ledger import Ledger, ledger_path_for
@@ -24,7 +25,7 @@ from .patch import apply_edits
 from .propose import propose_patches
 from .provider import CRITIC_QUESTIONS, create_provider
 from .risk import by_risk, suppress_findings
-from .tracer import Tracer
+from .tracer import Tracer, cost_usd
 from .verify import verify_patch
 
 
@@ -50,6 +51,10 @@ class Loop:
         self.quarantined_this_run = set()
         self.provider = None
         self.tracer = Tracer.create()
+        self.audit_log = AuditLog(config.get("auditLog"), cost_usd)
+        # Real token usage per fingerprint, accumulated across model calls,
+        # so the audit trail's cost mirrors what the tracer reported.
+        self.usage_by_fingerprint = {}
 
     def say(self, phase: str, message: str) -> None:
         self.emit({
@@ -150,6 +155,7 @@ class Loop:
                 self.state["status"] = "converged"
                 self.say("settle", "Converged.")
                 self._tracer_summary()
+                self._audit_summary()
                 self.tracer.flush()
                 return self.state
 
@@ -158,9 +164,30 @@ class Loop:
 
         self.state["status"] = "exhausted"
         self.say("settle", f"Iteration budget ({max_iterations}) reached")
+        self._audit_summary()
         self._tracer_summary()
         self.tracer.flush()
         return self.state
+
+    def _audit_summary(self) -> None:
+        """The run's final NDJSON line: totals that reconcile the attempt
+        lines above (same usage, same prices)."""
+        totals = {"input": 0, "output": 0}
+        for v in self.usage_by_fingerprint.values():
+            totals["input"] += v["input"]
+            totals["output"] += v["output"]
+        attempts = self.state.get("attempts", [])
+        self.audit_log.summary(
+            run_id=self.state["id"],
+            status=self.state.get("status", ""),
+            iterations=self.state.get("iteration", 0),
+            committed=sum(1 for a in attempts if a["outcome"] == "committed"),
+            reverted=sum(1 for a in attempts if a["outcome"] in ("regressed", "unverifiable")),
+            quarantined=sum(1 for a in attempts if a["outcome"] == "unverifiable"),
+            total_input=totals["input"],
+            total_output=totals["output"],
+        )
+        self.audit_log.close()
 
     def _tracer_summary(self) -> None:
         """A final settle span mirroring the ledger's attempt records — one
@@ -215,12 +242,18 @@ class Loop:
             try:
                 candidates = self.provider.propose(target, source_root)
                 self.say("verify", f"{self.provider.name} proposed {len(candidates)} candidate(s)")
+                usage = getattr(self.provider, "last_usage", None) or {}
                 self.tracer.generation(
-                    "propose",
-                    getattr(self.provider, "last_usage", None),
+                    "propose", usage,
                     fingerprint=target["fingerprint"],
                     check=target["check"], candidates=len(candidates),
                 )
+                # Local audit trail needs the same numbers, even when no
+                # Langfuse is configured.
+                acc = self.usage_by_fingerprint.setdefault(
+                    target["fingerprint"], {"input": 0, "output": 0})
+                acc["input"] += int(usage.get("inputTokens") or 0)
+                acc["output"] += int(usage.get("outputTokens") or 0)
             except Exception as err:
                 self.say("verify", f"Model proposer failed: {err}")
                 candidates = []
@@ -399,3 +432,19 @@ class Loop:
         }
         self.ledger.record(attempt)
         self.state["attempts"].append(attempt)
+        # One structured line per attempt — the local audit trail, with the
+        # real token usage of the model calls made for this finding.
+        usage = self.usage_by_fingerprint.get(finding["fingerprint"], {"input": 0, "output": 0})
+        patch_obj = attempt["patch"]
+        self.audit_log.attempt(
+            fingerprint=finding["fingerprint"],
+            outcome=outcome,
+            check=finding.get("check", ""),
+            code=finding.get("code") or "",
+            rationale=patch_obj.get("rationale", "") if isinstance(patch_obj, dict) else "",
+            provider=bool(self.provider),
+            collateral=collateral,
+            input_tokens=usage["input"],
+            output_tokens=usage["output"],
+            run_id=self.state["id"],
+        )

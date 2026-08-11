@@ -86,7 +86,11 @@ if (checks.length === 0) {
     '  --json               machine-readable final report on stdout\n' +
     '  --list-checks        print the checks that would run, then exit\n' +
     '  --watch              keep repairing as the repo drifts (Ctrl+C to stop)\n' +
-    '  --interval <secs>    with --watch: also re-check every N seconds',
+    '  --interval <secs>    with --watch: also re-check every N seconds\n' +
+    '  --trace <id>         audit a finished run: read its Langfuse trace and\n' +
+    '                       print the per-finding cost table (needs LANGFUSE keys)\n' +
+    '  --audit-log <path>   append one NDJSON line per repair attempt plus a\n' +
+    '                       run summary (fingerprint, outcome, cost) — no service',
   );
   process.exit(2);
 }
@@ -100,6 +104,7 @@ const config: RunConfig = {
   allowShared: args.has('allow-shared'),
   llmMock: args.get('llm-mock'),
   statePath: args.get('state'),
+  auditLog: args.get('audit-log'),
   git: args.has('git'),
   branch: args.get('branch'),
   quarantinedOk: args.has('quarantined-ok'),

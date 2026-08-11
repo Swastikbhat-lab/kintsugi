@@ -46,6 +46,8 @@ _USAGE = (
     "  --interval <secs>    with --watch: also re-check every N seconds\n"
     "  --trace <id>         audit a finished run: read its Langfuse trace and\n"
     "                       print the per-finding cost table (needs LANGFUSE keys)\n"
+    "  --audit-log <path>   append one NDJSON line per repair attempt plus a\n"
+    "                       run summary (fingerprint, outcome, cost) — no service\n"
 )
 
 _ICON = {"observe": "◎", "diagnose": "◆", "repair": "✎", "verify": "⟳", "settle": "■"}
@@ -122,6 +124,7 @@ def main(argv=None):
         "allowShared": "allow-shared" in args,
         "llmMock": args.get("llm-mock"),
         "statePath": os.path.abspath(args["state"]) if args.get("state") else None,
+        "auditLog": os.path.abspath(args["audit-log"]) if args.get("audit-log") else None,
         "git": "git" in args,
         "branch": args.get("branch"),
         "quarantinedOk": "quarantined-ok" in args,
