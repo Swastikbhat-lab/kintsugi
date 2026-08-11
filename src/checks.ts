@@ -3,6 +3,24 @@ import type { CheckDef, CheckResult } from './types.js';
 import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust } from './parsers.js';
 
 /**
+ * ANSI CSI color sequences — CI hosts force tool color (`CARGO_TERM_COLOR=
+ * always` is set by rustup actions, and many check scripts default to color
+ * when a terminal is detected). A colored diagnostic has escape codes before
+ * the `warning:`/`-->`/`panicked at` anchors, so every parser would miss it:
+ *
+ *   \x1b[1m\x1b[93mwarning\x1b[0m\x1b[1m: unused import: `std::fmt`\x1b[0m
+ *    \x1b[1m\x1b[96m--> \x1b[0msrc/lib.rs:1:5
+ *
+ * Output is sanitized at this one funnel, so every parser sees plain text.
+ * (The stripped form is also what the report displays.)
+ */
+const ANSI_RE = /\x1B\[[0-9;?]*[ -/]*[@-~]/g;
+
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
+/**
  * Run one check command and turn its output into findings.
  *
  * Checks run with cwd = source root, shell-resolved, so `npm run typecheck`
@@ -34,8 +52,8 @@ export function runCheck(
       child.kill();
     }, timeoutMs);
 
-    child.stdout.on('data', (d) => { output += d; });
-    child.stderr.on('data', (d) => { output += d; });
+    child.stdout.on('data', (d) => { output += stripAnsi(String(d)); });
+    child.stderr.on('data', (d) => { output += stripAnsi(String(d)); });
 
     child.on('error', (err) => {
       clearTimeout(timer);

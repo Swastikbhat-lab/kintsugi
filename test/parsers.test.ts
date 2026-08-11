@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust } from '../src/parsers.js';
+import { runCheck } from '../src/checks.js';
 
 const CWD = '/repo';
 
@@ -324,6 +327,32 @@ test('rust parser reads a denied lint (`-D warnings`) printed as error:', () => 
 
   assert.equal(f.code, 'unused_imports');
   assert.equal(f.line, 1);
+});
+
+test('colorized check output is sanitized before parsing (CARGO_TERM_COLOR=always)', async () => {
+  // CI hosts force tool color, which prefixes every diagnostic anchor with
+  // ANSI escapes (`\x1b[1m\x1b[93mwarning\x1b[0m: …`, `\x1b[96m--> \x1b[0m`).
+  // The funnel must strip them or every parser goes blind. Spawn a real
+  // process so the whole runCheck pipeline is exercised, not just the parser.
+  const root = mkdtempSync(join(tmpdir(), 'kintsugi-color-'));
+  const script = join(root, 'emit.mjs');
+  const esc = '\x1b';
+  writeFileSync(script, [
+    `process.stderr.write(${JSON.stringify(
+      `${esc}[1m${esc}[93mwarning${esc}[0m${esc}[1m:${esc}[0m unused import: \`std::fmt\`\n ${esc}[1m${esc}[96m--> ${esc}[0msrc/lib.rs:1:5\n`,
+    )});`,
+    'process.exitCode = 1;',
+  ].join('\n'));
+
+  const r = await runCheck(
+    { name: 'rs:lint', command: `node "${script}"`, parser: 'rust', severity: 'minor' },
+    root,
+  );
+
+  assert.equal(r.crashed, false, r.output);
+  assert.equal(r.findings.length, 1, r.output);
+  assert.equal(r.findings[0].code, 'unused_imports');
+  assert.equal(norm(r.findings[0].file), norm(join(root, 'src/lib.rs')));
 });
 
 test('rust parser reads rustc compile errors in default format', () => {

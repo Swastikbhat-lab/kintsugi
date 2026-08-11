@@ -1,5 +1,7 @@
 import os
+import sys
 
+from kintsugi.checks import run_check
 from kintsugi.parsers import parse_lines, parse_strict
 
 CWD = os.path.abspath(os.path.join(os.path.dirname(__file__), "repo"))
@@ -126,3 +128,32 @@ def test_fingerprints_are_stable_across_numbers_but_differ_by_defect():
     c = parse_strict("src/a.py:1:1: F401 'sys' imported but unused", CWD, "py:lint")
     assert a[0]["fingerprint"] == b[0]["fingerprint"]
     assert a[0]["fingerprint"] != c[0]["fingerprint"]
+
+
+def test_colorized_output_is_sanitized_before_parsing(tmp_path):
+    # CI hosts force tool color (rustup actions set CARGO_TERM_COLOR=always),
+    # which prefixes every diagnostic anchor with ANSI escapes (`\x1b[1m\x1b[93m
+    # warning\x1b[0m: …`, `\x1b[96m--> \x1b[0m`). The funnel must strip them or
+    # the loop converges with zero repairs. Spawn a real child process so the
+    # whole run_check pipeline is exercised.
+    script = tmp_path / "emit.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('\\x1b[1m\\x1b[93mwarning\\x1b[0m\\x1b[1m:\\x1b[0m unused import: `std::fmt`\\n"
+        " \\x1b[1m\\x1b[96m--> \\x1b[0msrc/lib.rs:1:5\\n')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    r = run_check(
+        {
+            "name": "rs:lint",
+            "command": f'"{sys.executable}" "{script}"',
+            "parser": "rust",
+            "severity": "minor",
+        },
+        str(tmp_path),
+    )
+    assert r["crashed"] is False, r["output"]
+    assert len(r["findings"]) == 1, r["output"]
+    assert r["findings"][0]["code"] == "unused_imports"
+    assert r["findings"][0]["file"].replace("\\", "/").endswith("/src/lib.rs")

@@ -8,10 +8,25 @@ working code because its own plumbing failed.
 """
 
 import os
+import re
 import subprocess
 import time
 
 from .parsers import parse_lines, parse_rust, parse_strict
+
+# ANSI CSI color sequences. CI hosts force tool color (rustup actions set
+# CARGO_TERM_COLOR=always), and colored diagnostics carry escape codes before
+# the `warning:`/`-->`/`panicked at` anchors every parser relies on:
+#
+#   \x1b[1m\x1b[93mwarning\x1b[0m: unused import: `std::fmt`
+#    \x1b[1m\x1b[96m--> \x1b[0msrc/lib.rs:1:5
+#
+# Output is sanitized at this one funnel so every parser sees plain text.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
 
 
 def _parse(defn, output: str, cwd: str):
@@ -68,7 +83,7 @@ def run_check(defn, cwd: str, timeout_ms: int | None = None):
         code = -2
         killed = True
 
-    output = output or ""
+    output = _strip_ansi(output or "")
     duration_ms = int((time.time() - started) * 1000)
     # Exit 0 means the check passed — its output may still *look* like
     # findings, but a passing check contributes no findings by definition.
