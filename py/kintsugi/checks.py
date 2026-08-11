@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 
-from .parsers import parse_lines, parse_rust, parse_strict
+from .parsers import parse_lines, parse_radon, parse_rust, parse_strict
 
 # ANSI CSI color sequences. CI hosts force tool color (rustup actions set
 # CARGO_TERM_COLOR=always), and colored diagnostics carry escape codes before
@@ -37,6 +37,8 @@ def _parse(defn, output: str, cwd: str):
         return parse_lines(output, cwd, defn["name"])
     if parser == "rust":
         return parse_rust(output, cwd, defn["name"])
+    if parser == "radon":
+        return parse_radon(output, cwd, defn["name"])
     # tsc/tap/spec output shapes belong to the Node engine; a config that
     # declares them here is a config that cannot be read.
     return []
@@ -60,8 +62,6 @@ def run_check(defn, cwd: str, timeout_ms: int | None = None):
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
         )
     except OSError as err:
         return {
@@ -75,20 +75,31 @@ def run_check(defn, cwd: str, timeout_ms: int | None = None):
 
     killed = False
     try:
-        output, _ = proc.communicate(timeout=timeout_ms / 1000)
+        raw, _ = proc.communicate(timeout=timeout_ms / 1000)
         code = proc.returncode
     except subprocess.TimeoutExpired:
         proc.kill()
-        output, _ = proc.communicate()
+        raw, _ = proc.communicate()
         code = -2
         killed = True
 
-    output = _strip_ansi(output or "")
+    # Decode UTF-8 explicitly: the engines' own scanners (and tools like
+    # ruff) emit UTF-8, but text=True would decode with the *locale* (cp1252
+    # on Windows) and mangle every non-ASCII byte — corrupting messages and
+    # with them the fingerprints the ledger keys on. This mirrors the TS
+    # engine's String(buffer) decode, so both engines agree byte-for-byte.
+    output = _strip_ansi((raw or b"").decode("utf-8", errors="replace"))
     duration_ms = int((time.time() - started) * 1000)
     # Exit 0 means the check passed — its output may still *look* like
     # findings, but a passing check contributes no findings by definition.
-    # Crash means *no typed output at all* — a broken harness.
-    parsed = [] if code == 0 else _parse(defn, output, cwd)
+    # Except when the check declares parseOnExit0 (analysis tools like
+    # radon always exit 0 — their findings live in the text, not the
+    # status). pytest exits 5 with "no tests ran" for an empty suite — that
+    # is a clean state, not a defect and not a broken harness, and it must
+    # not block the verify gate (test generation exists precisely to give a
+    # testless repo its first tests).
+    empty_suite = re.search(r"no tests ran", output, re.IGNORECASE) is not None
+    parsed = [] if empty_suite or (code == 0 and not defn.get("parseOnExit0")) else _parse(defn, output, cwd)
 
     # A check owns its defect class: filterCodes keeps only the codes it was
     # configured for, and a configured severity overrides the parser default.
@@ -104,6 +115,6 @@ def run_check(defn, cwd: str, timeout_ms: int | None = None):
         "findings": findings,
         "exitCode": code,
         "durationMs": duration_ms,
-        "crashed": killed or (code != 0 and len(parsed) == 0),
+        "crashed": killed or (not empty_suite and code != 0 and len(parsed) == 0),
         "output": output,
     }

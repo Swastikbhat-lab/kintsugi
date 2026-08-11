@@ -256,4 +256,5 @@ def test_mixed_python_and_rust_repo_gets_the_union(tmp_path):
     (tmp_path / "Cargo.toml").write_text('[package]\nname = "tax"\n', encoding="utf-8")
     probe = fake_probe(["python -m pytest --version", "ruff --version", "cargo --version"])
     checks = default_checks(str(tmp_path), probe)
-    assert [c["name"] for c in checks] == ["py:test", "py:lint", "rs:lint", "rs:test"]
+    assert [c["name"] for c in checks] == [
+        "py:test", "py:lint", "py:testgen", "rs:lint", "rs:test"]

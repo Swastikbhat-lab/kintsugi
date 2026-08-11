@@ -23,6 +23,13 @@ import subprocess
 PY_MARKERS = ["pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "poetry.lock"]
 _REQ_RE = re.compile(r"^requirements.*\.txt$")
 
+# The engine's own Python package — where the stdlib-only scanner scripts
+# (perf anti-patterns, best practices, test-generation detection) live.
+# Both engines point their checks at these same scripts, so a Python repo
+# audited by the Node engine gets byte-identical detection.
+_ENGINE_PY = os.path.dirname(os.path.abspath(__file__))
+_PY_SCRIPT = lambda n: os.path.join(_ENGINE_PY, n)  # noqa: E731
+
 
 def probe_command(command: str) -> bool:
     """Availability probe — True when the command exits 0."""
@@ -134,6 +141,63 @@ def python_checks(source_root: str, probe=probe_command):
         checks.append({
             "name": "py:lint",
             "command": f"{ruff} check . --output-format=concise",
+            "parser": "strict",
+            "severity": "minor",
+        })
+
+    # Security and complexity analysis, gated on their tools exactly like
+    # ruff. bandit's custom template turns its report into one strict line
+    # per issue (`src/creds.py:1:B105:...`); radon always exits 0, so its
+    # check carries parseOnExit0 and a parser of its own.
+    if probe("bandit --version"):
+        # Test files are excluded (bandit's own docs recommend it): B101
+        # fires on every `assert` in a test, which is noise, and the
+        # test-generation repair produces assert-bearing tests by design.
+        checks.append({
+            "name": "py:bandit",
+            "command": "bandit -q -r . "
+                       "-x .venv,venv,node_modules,dist,build,**/test_*.py,test_*.py,"
+                       "**/*_test.py,*_test.py,tests "
+                       "-f custom --msg-template {relpath}:{line}:{test_id}:{severity}:{msg}",
+            "parser": "strict",
+            "severity": "major",
+        })
+    if probe("radon --version"):
+        checks.append({
+            "name": "py:radon",
+            "command": "radon cc -s --min C .",
+            "parser": "radon",
+            "severity": "minor",
+            "parseOnExit0": True,
+        })
+
+    # The engine's own stdlib-only scanners need no third-party tool, just
+    # a Python interpreter — so they are always on for Python repos (the
+    # script's existence is the only other gate). Test-generation detection
+    # is gated on pytest so "generate → run" is always backed by a runner.
+    any_py = None
+    for interp in interps:
+        if probe(f'{interp} -c "import ast"'):
+            any_py = interp
+            break
+    if any_py and os.path.exists(_PY_SCRIPT("lint_perf.py")):
+        checks.append({
+            "name": "py:perf",
+            "command": f'{any_py} "{_PY_SCRIPT("lint_perf.py")}" .',
+            "parser": "strict",
+            "severity": "minor",
+        })
+    if any_py and os.path.exists(_PY_SCRIPT("lint_best.py")):
+        checks.append({
+            "name": "py:best-practices",
+            "command": f'{any_py} "{_PY_SCRIPT("lint_best.py")}" .',
+            "parser": "strict",
+            "severity": "minor",
+        })
+    if pytest and os.path.exists(_PY_SCRIPT("testgen_detect.py")):
+        checks.append({
+            "name": "py:testgen",
+            "command": f'{pytest} "{_PY_SCRIPT("testgen_detect.py")}" .',
             "parser": "strict",
             "severity": "minor",
         })

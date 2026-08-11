@@ -24,8 +24,10 @@ def test_python_repo_detects_pytest_and_ruff_venv_aware(tmp_path):
     ])
     checks = default_checks(str(tmp_path), probe)
 
+    # testgen is gated on pytest alone (the engine scanner needs no third-
+    # party tool); bandit/radon/perf/best need their probes to answer.
     names = [c["name"] for c in checks]
-    assert names == ["py:test", "py:lint"]
+    assert names == ["py:test", "py:lint", "py:testgen"]
     assert "pytest" in checks[0]["command"] and "--tb=line" in checks[0]["command"]
     assert checks[0]["severity"] == "blocker"
     assert "ruff" in checks[1]["command"]
@@ -36,7 +38,7 @@ def test_python_repo_without_ruff_still_gets_pytest(tmp_path):
     (tmp_path / "setup.py").write_text("", encoding="utf-8")
     probe = fake_probe(["python -m pytest --version"])
     checks = default_checks(str(tmp_path), probe)
-    assert [c["name"] for c in checks] == ["py:test"]
+    assert [c["name"] for c in checks] == ["py:test", "py:testgen"]
 
 
 def test_python_repo_with_no_tools_gets_no_checks(tmp_path):
@@ -59,7 +61,8 @@ def test_mixed_python_and_go_repo_gets_the_union(tmp_path):
     (tmp_path / "go.mod").write_text("module x\n", encoding="utf-8")
     probe = fake_probe(["python -m pytest --version", "ruff --version", "go version"])
     checks = default_checks(str(tmp_path), probe)
-    assert [c["name"] for c in checks] == ["py:test", "py:lint", "go:vet", "go:test"]
+    assert [c["name"] for c in checks] == [
+        "py:test", "py:lint", "py:testgen", "go:vet", "go:test"]
 
 
 def test_config_file_overrides_discovery(tmp_path):

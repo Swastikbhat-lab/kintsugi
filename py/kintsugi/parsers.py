@@ -179,6 +179,58 @@ def parse_lines(output: str, cwd: str, check: str):
         })
     return findings
 
+# ------------------------------------------------------------- radon
+
+_RADON_HEADER = re.compile(r"^\s*([^\s].*\.py)\s*$")
+_RADON_FN = re.compile(r"^\s+[FMC]\s+(\d+):(\d+)\s+(\S+)\s+-\s+([A-F])\s+\((\d+)\)\s*$")
+
+
+def parse_radon(output: str, cwd: str, check: str):
+    """radon cyclomatic-complexity output (`radon cc -s --min C`). Unlike
+    the other parsers this check runs with parseOnExit0: radon always exits
+    0 — its findings live in the text, not the status. The plain format is
+    a per-file header line followed by indented function lines:
+
+      src/tax.py
+          F 1:0 apply_tax - C (11)
+
+    Only C+ ranks are emitted by the check command (`--min C`); the parser
+    also drops A/B defensively, because complexity below C is not a defect
+    a repair loop should spend an iteration on.
+    """
+    findings = []
+    file = None
+    for raw in output.split("\n"):
+        line = raw.rstrip("\r")
+        if not line:
+            continue
+        header = _RADON_HEADER.match(line)
+        if header:
+            file = normalize_path(header.group(1), cwd)
+            continue
+        m = _RADON_FN.match(line)
+        if not m or not file:
+            continue
+        rank = m.group(4)
+        if rank in ("A", "B"):
+            continue
+        cc = int(m.group(5))
+        name = m.group(3)
+        message = f"cyclomatic complexity {rank} ({cc}): {name}"
+        code = f"CC_{rank}"
+        findings.append({
+            "fingerprint": fingerprint(check, file, code, message),
+            "check": check,
+            "severity": "minor",
+            "summary": message,
+            "file": file,
+            "line": int(m.group(1)),
+            "code": code,
+            "evidence": {"message": message, "rank": rank, "complexity": cc, "name": name},
+        })
+    return findings
+
+
 # ------------------------------------------------------------- rust
 
 _PANIC = re.compile(r"panicked at\s+([^:\s]+):(\d+)(?::(\d+))?:?\s*(.*)$")

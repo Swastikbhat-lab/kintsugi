@@ -35,6 +35,12 @@ export interface Edit {
   file: string;
   find: string;
   replace: string;
+  /**
+   * Create the file with `replace` as its content instead of editing an
+   * existing one (test generation). The target must not already exist;
+   * reverting deletes the file again. `find` is unused and must be empty.
+   */
+  create?: boolean;
 }
 
 export interface Patch extends Edit {
@@ -81,7 +87,7 @@ export interface Attempt {
 // ------------------------------------------------------------- checks
 
 /** How a check's output is turned into findings. */
-export type ParserKind = 'tsc' | 'tap' | 'lines' | 'strict' | 'rust';
+export type ParserKind = 'tsc' | 'tap' | 'lines' | 'strict' | 'rust' | 'radon';
 
 export interface CheckDef {
   name: string;
@@ -98,6 +104,14 @@ export interface CheckDef {
    * run (cargo compiles the crate and its deps before testing/linting).
    */
   timeoutMs?: number;
+  /**
+   * Parse findings from the output even when the command exits 0. Most
+   * tools reserve a non-zero exit for "found something", but analysis
+   * tools like radon always exit 0 — their findings are in the text, not
+   * the status. (A check with this flag that exits 0 with no parseable
+   * output is simply clean, never crashed.)
+   */
+  parseOnExit0?: boolean;
 }
 
 export interface CheckResult {

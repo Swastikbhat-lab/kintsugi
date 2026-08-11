@@ -21,7 +21,12 @@ check whose tool is missing:
 
 - **npm** — `typecheck` (tsc) + `test` (tap) from `package.json` scripts
 - **Python** — `py:test` (pytest `-q --tb=line`) + `py:lint` (ruff
-  `--output-format=concise`), venv-aware (`.venv`/`venv` preferred)
+  `--output-format=concise`), venv-aware (`.venv`/`venv` preferred); plus
+  `py:bandit` (`bandit -q -r . -f custom --msg-template …`, strict,
+  test files excluded) and `py:radon` (`radon cc -s --min C .`, parser
+  `radon`, `parseOnExit0`) when those tools are installed; and the engine's
+  own stdlib-only scanners `py:perf` / `py:best-practices` / `py:testgen`
+  (a Python interpreter is all they need)
 - **Go** — `go:test` (`go test ./...`) + `go:vet` (`go vet ./...`)
 - **Rust** — `rs:test` (`cargo test --quiet`) + `rs:lint` (`cargo clippy
   -- -D warnings`), each with a 300s timeout for cargo's cold builds
@@ -41,6 +46,7 @@ speaks TAP on every platform.
 | `lines` | one `path: message` (or bare `message`) per line | `README.md: version 0.1.0 does not match 0.2.0` |
 | `strict` | `path:line[:col]: message` only — bare lines are never findings | `src/foo.py:12:5: F401 'os' imported but unused` |
 | `rust` | cargo test panic frames (`panicked at path:line:col:`), paired `warning:`/`error…:` + `--> path:line:col` diagnostics, and short-format lines | `warning: unused import: \`std::fmt\`` + `--> src/lib.rs:2:5` |
+| `radon` | radon plain output (`path` header + `F line:col name - rank (cc)` lines); A/B ranks are dropped, only C+ are findings | `cyclomatic complexity C (11): apply_tax` |
 
 `strict` (and `rust`) are defensive beyond the shape: paths under
 `node_modules`, `dist`, `build`, `.git`, `target` (cargo's build dir),
@@ -60,10 +66,23 @@ run the same propose -> critics -> gate -> verify flow when a provider is
 configured.
 
 A check that exits non-zero with no parseable finding is a **crash** — the
-loop reports it and never heals it. One exception is built in: if the
+loop reports it and never heals it. Two exceptions are built in: if the
 declared parser yields nothing but the output is clearly spec-shaped
 (`✔`/`✖`), it is parsed as spec — a repo whose `npm test` omits the tap
-reporter is a repo with failing tests, never a broken harness.
+reporter is a repo with failing tests, never a broken harness; and a check
+with `parseOnExit0` (radon) parses its output even on exit 0, because some
+tools keep their findings in the text rather than the status. pytest's exit
+5 (`no tests ran`) is treated as clean — an empty suite is neither a defect
+nor a broken harness, and test generation exists to give a testless repo
+its first tests.
+
+**Finding queue.** Findings are filtered and ranked before repair:
+`suppressFindings` drops findings in generated code (`*generated*`,
+`*_gen.py`, `migrations/`, `vendor/`) and style findings (T/P/CC codes) in
+test files — real test *failures* are never suppressed; `riskOf` scores
+impact/likelihood/fix-cost/scope into a 0-10 risk score, and the queue is
+ordered worst-first within each severity band. The arithmetic is identical
+in both engines, so the order they converge in matches byte-for-byte.
 
 ## Findings
 
@@ -94,6 +113,16 @@ root; a model-supplied path that resolves outside it is dropped.
 Blast radius is computed from the import graph: `local` (≤1 importer) is
 applied; `shared` (≥2 importers) is escalated with the count unless
 `--allow-shared`.
+
+## Observability (optional)
+
+Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` (plus optionally
+`LANGFUSE_HOST`, `KINTSUGI_INPUT_PRICE`, `KINTSUGI_OUTPUT_PRICE`) and the
+loop emits one Langfuse trace per run — a span per check observation, a
+`generation` per model call with the *reported* token usage (never a guess)
+and the derived cost, and a span per verify. Without keys, or without the
+`langfuse` SDK installed, the tracer is inert: telemetry can never take the
+repair loop down.
 
 ## Ledger
 

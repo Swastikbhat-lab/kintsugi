@@ -15,7 +15,7 @@ import re
 SKIP = re.compile(r"(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)")
 PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))", re.MULTILINE)
 # Test files are not product importers — they exercise the code, not own it.
-TEST_FILE = re.compile(r"(?:^|[/\\])(?:test_|_test)\.py$")
+TEST_FILE = re.compile(r"(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$")
 
 
 def build_import_graph(source_root: str):

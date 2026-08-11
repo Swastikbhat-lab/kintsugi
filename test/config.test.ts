@@ -32,13 +32,32 @@ test('npm repo: typecheck + test from its own scripts', async () => {
   assert.equal(checks[1].parser, 'tap');
 });
 
-test('python repo: py:test via pytest and py:lint via ruff', async () => {
+test('python repo: pytest, ruff, bandit, radon and the engine scanners', async () => {
   const root = makeRepo({ 'pyproject.toml': '[project]\nname="demo"\n' });
   const checks = await defaultChecks(root, probe(true));
-  assert.deepEqual(names(checks), ['py:test', 'py:lint']);
+  assert.deepEqual(names(checks), [
+    'py:test', 'py:lint', 'py:bandit', 'py:radon', 'py:perf', 'py:best-practices', 'py:testgen',
+  ]);
   assert.equal(checks[0].parser, 'strict');
   assert.equal(checks[0].severity, 'blocker');
   assert.equal(checks[1].severity, 'minor');
+  assert.equal(checks[2].severity, 'major');
+  // bandit speaks the strict contract; radon always exits 0, so its check
+  // parses output on exit 0 and carries a parser of its own.
+  assert.ok(checks[2].command.includes('--msg-template'), checks[2].command);
+  assert.equal(checks[3].parser, 'radon');
+  assert.equal(checks[3].parseOnExit0, true);
+  // The stdlib-only scanners need nothing but a Python interpreter.
+  assert.equal(checks[4].name, 'py:perf');
+  assert.equal(checks[5].name, 'py:best-practices');
+  assert.ok(checks[6].command.includes('testgen_detect.py'), checks[6].command);
+});
+
+test('python repo without bandit or radon still gets the engine scanners', async () => {
+  const root = makeRepo({ 'pyproject.toml': '[project]\nname="demo"\n' });
+  const checks = await defaultChecks(root, async (cmd) =>
+    cmd.includes('pytest') || cmd.includes('ruff') || cmd.includes('import ast'));
+  assert.deepEqual(names(checks), ['py:test', 'py:lint', 'py:perf', 'py:best-practices', 'py:testgen']);
 });
 
 test('python repo without pytest gets no python checks', async () => {
@@ -98,7 +117,9 @@ test('mixed npm + python repo gets the union of toolchains', async () => {
     'pyproject.toml': '[project]\nname="demo"\n',
   });
   const checks = await defaultChecks(root, probe(true));
-  assert.deepEqual(names(checks), ['test', 'py:test', 'py:lint']);
+  assert.deepEqual(names(checks), [
+    'test', 'py:test', 'py:lint', 'py:bandit', 'py:radon', 'py:perf', 'py:best-practices', 'py:testgen',
+  ]);
 });
 
 test('a repo with no markers at all gets zero checks', async () => {

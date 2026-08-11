@@ -70,6 +70,10 @@ def propose_patches(finding: dict, source_root: str):
         return unsorted_import_block_patches(finding, source_root)
     if code == "unused_imports":
         return unused_rust_import_patches(finding, source_root)
+    if code in ("T201", "T202", "T203"):
+        return best_practice_patches(finding, source_root, code)
+    if code == "T001":
+        return testgen_patches(finding, source_root)
 
     check = finding["check"]
     message = f"{finding['summary']} {finding.get('evidence', {}).get('message', '')}"
@@ -303,6 +307,125 @@ def unused_rust_import_patches(finding: dict, source_root: str):
     return remove_line_patch(file, text, idx, f"'{path}' is imported but never used — removing the use.")
 
 
+# -------------------------------------------------------------- best practices (T201-T203)
+
+def best_practice_patches(finding: dict, source_root: str, kind: str):
+    """The mechanically fixable best-practices findings from the
+    `py:best-practices` check. Each rewrite is exact, anchored on the
+    reported line, and semantically equivalent — the verify gate re-runs
+    the checks, so a rewrite that disagrees with the language's semantics
+    is reverted, not shipped."""
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    text = _read(file)
+    lines = text.split("\n")
+    idx = line - 1
+    if idx < 0 or idx >= len(lines):
+        return []
+    line_text = lines[idx]
+
+    if kind == "T201":
+        # `type(x) == T` compares identity, not types — isinstance is the
+        # intended check. The RHS guard refuses `type(x) == type(y)`.
+        m = re.search(r"type\(\s*([^)]*?)\s*\)\s*(?:==|is)\s+(?!type\s*\()([A-Za-z_][\w.]*)", line_text)
+        if not m:
+            return []
+        find = m.group(0)
+        replace = f"isinstance({m.group(1)}, {m.group(2)})"
+        rationale = "type() compares identity, not types — using isinstance()."
+    elif kind == "T202":
+        # `len(x) == 0` → `not x`; `len(x) != 0` / `len(x) > 0` → `x`; and
+        # the mirrored `0 == len(x)` forms. Bare identifiers only.
+        fwd = re.search(r"\blen\(([A-Za-z_]\w*)\)\s*(==|!=|>)\s*0\b", line_text)
+        rev = re.search(r"\b0\s*(==|!=|<)\s*len\(([A-Za-z_]\w*)\)", line_text)
+        if not (fwd or rev):
+            return []
+        m = fwd or rev
+        # fwd captures (name, op); rev captures (op, name).
+        name = fwd.group(1) if fwd else rev.group(2)
+        op = fwd.group(2) if fwd else rev.group(1)
+        find = m.group(0)
+        replace = f"not {name}" if op == "==" else name
+        rationale = "len() comparison against a literal — using truthiness instead."
+    else:  # T203
+        # `key in d.keys()` — the keys view is redundant; `in d` is equivalent.
+        m = re.search(r"((?:'[^']*'|\"[^\"]*\"|[A-Za-z_]\w*)\s+in\s+)([A-Za-z_]\w*)\.keys\(\)", line_text)
+        if not m:
+            return []
+        find = m.group(0)
+        replace = m.group(1) + m.group(2)
+        rationale = "'in d.keys()' — the keys view is redundant; 'in d' is equivalent."
+    return unique_or_empty(file, text, find, replace, rationale)
+
+
+# -------------------------------------------------------------- test generation (T001)
+
+def testgen_patches(finding: dict, source_root: str):
+    """A function with no tests (`py:testgen` T001). The mechanical answer
+    is not a rewrite but a *new file*: a smoke test next to the module,
+    covering every untested top-level function in one patch. The verify gate
+    then runs pytest — if the module cannot even be imported, the new test
+    fails and the file is reverted, which is exactly the honest signal."""
+    file = finding.get("file")
+    if not file:
+        return []
+    stem = os.path.splitext(os.path.basename(file))[0]
+    test_path = os.path.join(os.path.dirname(file), f"test_{stem}.py")
+    # The detector only reports modules with no sibling test file; if one
+    # has appeared since, the finding is already resolved.
+    if os.path.exists(test_path):
+        return []
+
+    text = _read(file)
+    # Top-level only: `^` at column 0 never matches an indented nested def.
+    funcs = [
+        m for m in re.findall(r"^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(", text, re.M)
+        if not m.startswith("_")
+    ]
+    if not funcs:
+        return []
+
+    # The import spec follows pytest's sys.path rule: walk up through
+    # package dirs (those with __init__.py); the module is importable as
+    # the dotted path from the first non-package ancestor.
+    parts = [stem]
+    d = os.path.dirname(file)
+    while os.path.exists(os.path.join(d, "__init__.py")):
+        parts.insert(0, os.path.basename(d))
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    spec = ".".join(parts)
+
+    rel = os.path.relpath(file, source_root).replace("\\", "/")
+    # Member names sorted case-insensitively (isort's default), so the
+    # generated file is I001-clean and the verify gate has nothing to see.
+    sorted_funcs = sorted(funcs, key=str.lower)
+    # Two blank lines between top-level defs (PEP 8) — a generated file must
+    # not introduce style findings in a stricter repo.
+    body = "\n\n\n".join(
+        f"def test_{f}_is_importable():\n    assert callable({f})" for f in sorted_funcs
+    )
+    content = "\n".join([
+        f'"""Smoke tests for {rel} — generated by Kintsugi (no coverage found)."""',
+        "",
+        f"from {spec} import {', '.join(sorted_funcs)}",
+        "",
+        "",
+        body,
+        "",
+    ])
+    patch = _mk_patch(
+        test_path, "", content,
+        f"No test covers {rel} — generating a smoke test and letting the checks run it.",
+    )
+    patch["create"] = True
+    return [patch]
+
+
 # -------------------------------------------------------------- assertion → constant
 
 def assertion_constant_patches(finding: dict, source_root: str, lang: str):
@@ -399,7 +522,7 @@ def find_function_body(fn: str, source_root: str, lang: str):
     if lang == "python":
         sig_re = re.compile(rf"def\s+{_esc(fn)}\s*\(([^)]*)\)")
         param_re = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^,)]+)?(?:,|$)")
-        test_file = re.compile(r"(?:^|[/\\])(?:test_|_test)\.py$")
+        test_file = re.compile(r"(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$")
     elif lang == "go":
         sig_re = re.compile(rf"func\s+{_esc(fn)}\s*\(([^)]*)\)")
         param_re = re.compile(r"^\s*([A-Za-z_]\w*)\s+[^,)]+(?:,|$)")

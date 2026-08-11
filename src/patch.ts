@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { relative, resolve, isAbsolute } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { relative, resolve, isAbsolute, dirname } from 'node:path';
 import type { Edit } from './types.js';
 
 /**
@@ -17,6 +17,18 @@ export function applyEdit(edit: Edit, sourceRoot: string): () => void {
   const rel = relative(root, file);
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Patch targets ${file}, outside source root ${root}`);
+  }
+
+  // A create edit (test generation) writes a brand-new file and hands back
+  // its deletion as the undo — reverting a failed patch must not leave an
+  // orphaned file behind, any more than it leaves an edited line.
+  if (edit.create) {
+    if (existsSync(file)) {
+      throw new Error(`Refusing to create ${rel}: it already exists`);
+    }
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, edit.replace);
+    return () => unlinkSync(file);
   }
 
   const original = readFileSync(file, 'utf8');

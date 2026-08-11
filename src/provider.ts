@@ -151,6 +151,8 @@ export class ClaudeProvider implements Provider {
   readonly name = 'claude';
   private client: any;
   private degraded = false;
+  /** The usage the most recent model call reported — the tracer's numbers. */
+  lastUsage: { inputTokens: number; outputTokens: number } | null = null;
 
   private constructor(client: any) {
     this.client = client;
@@ -219,6 +221,13 @@ export class ClaudeProvider implements Provider {
       this.degraded = true;
       res = await this.client.beta.messages.create({ ...base, output_config: structured });
     }
+
+    // Real usage, straight from the response — observability is only worth
+    // anything when the numbers are the model's, not a guess.
+    const usage = res.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+    this.lastUsage = usage
+      ? { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 }
+      : null;
 
     if (res.stop_reason === 'refusal') return null;
 

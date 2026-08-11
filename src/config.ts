@@ -1,7 +1,18 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { CheckDef } from './types.js';
+
+/**
+ * The engine's own Python package — where the stdlib-only scanner scripts
+ * (perf anti-patterns, best practices, test-generation detection) live.
+ * Both engines point their checks at these same scripts, so a Python repo
+ * audited by the Node engine gets byte-identical detection to the Python
+ * engine's.
+ */
+const ENGINE_PY = join(dirname(dirname(fileURLToPath(import.meta.url))), 'py', 'kintsugi');
+const PY_SCRIPT = (n: string) => join(ENGINE_PY, n);
 
 /**
  * Config loading.
@@ -158,6 +169,66 @@ async function pythonChecks(sourceRoot: string, probe: ToolProbe): Promise<Check
       : undefined;
   if (ruff) {
     checks.push({ name: 'py:lint', command: `${ruff} check . --output-format=concise`, parser: 'strict', severity: 'minor' });
+  }
+
+  // Security and complexity analysis, gated on their tools exactly like
+  // ruff. bandit's custom template turns its report into one strict line
+  // per issue (`src/creds.py:1:B105:...`); radon always exits 0, so its
+  // check carries parseOnExit0 and a parser of its own.
+  if (await probe('bandit --version')) {
+    checks.push({
+      name: 'py:bandit',
+      // Test files are excluded (bandit's own docs recommend it): B101
+      // fires on every `assert` in a test, which is noise, and the
+      // test-generation repair produces assert-bearing tests by design.
+      command: 'bandit -q -r . -x .venv,venv,node_modules,dist,build,**/test_*.py,test_*.py,**/*_test.py,*_test.py,tests -f custom --msg-template {relpath}:{line}:{test_id}:{severity}:{msg}',
+      parser: 'strict',
+      severity: 'major',
+    });
+  }
+  if (await probe('radon --version')) {
+    checks.push({
+      name: 'py:radon',
+      command: 'radon cc -s --min C .',
+      parser: 'radon',
+      severity: 'minor',
+      parseOnExit0: true,
+    });
+  }
+
+  // The engine's own stdlib-only scanners need no third-party tool, just a
+  // Python interpreter — so they are always on for Python repos (the
+  // script's existence is the only other gate; an engine checkout without
+  // the py package simply has nothing to point at). Test-generation
+  // detection is gated on pytest so "generate → run" is always backed by a
+  // runner.
+  let anyPy: string | undefined;
+  for (const interp of interps) {
+    if (await probe(`${interp} -c "import ast"`)) { anyPy = interp; break; }
+  }
+  if (anyPy && existsSync(PY_SCRIPT('lint_perf.py'))) {
+    checks.push({
+      name: 'py:perf',
+      command: `${anyPy} "${PY_SCRIPT('lint_perf.py')}" .`,
+      parser: 'strict',
+      severity: 'minor',
+    });
+  }
+  if (anyPy && existsSync(PY_SCRIPT('lint_best.py'))) {
+    checks.push({
+      name: 'py:best-practices',
+      command: `${anyPy} "${PY_SCRIPT('lint_best.py')}" .`,
+      parser: 'strict',
+      severity: 'minor',
+    });
+  }
+  if (pytest && existsSync(PY_SCRIPT('testgen_detect.py'))) {
+    checks.push({
+      name: 'py:testgen',
+      command: `${pytest} "${PY_SCRIPT('testgen_detect.py')}" .`,
+      parser: 'strict',
+      severity: 'minor',
+    });
   }
 
   return checks;

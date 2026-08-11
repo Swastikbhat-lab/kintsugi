@@ -66,7 +66,10 @@ own scripts offer — no config file needed for the common cases:
 
 - **npm** — `typecheck` + `test` from `package.json` scripts
 - **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
-  (`.venv`/`venv` preferred over the system interpreter)
+  (`.venv`/`venv` preferred over the system interpreter); plus `py:bandit`
+  (security) and `py:radon` (complexity) when those tools are installed,
+  and `py:perf` / `py:best-practices` / `py:testgen` — the engine's own
+  stdlib-only scanners, always on for Python repos
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
 - **Rust** — `rs:test` (`cargo test`) and `rs:lint` (`cargo clippy -D warnings`)
 - **Mixed** repos get the union of their toolchains
@@ -84,11 +87,23 @@ Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing. `--list-checks` prints what would
 run. The mechanical repair rules cover TypeScript (dead declarations,
 imports, exports, extensions), Python (unused imports `F401`, unsorted
-import blocks `I001`, wrong constants behind failing assertions), Go (unused
-imports, wrong constants behind failing assertions), and Rust (unused `use`
-imports, wrong constants behind failing `assert_eq!`s). Everything else
-is surfaced as a typed, file-anchored finding and quarantined with evidence
-— or repaired by a model, if one is configured.
+import blocks `I001`, wrong constants behind failing assertions,
+best-practice rewrites `T201`/`T202`/`T203`, and **test generation** — a
+function with no tests gets a smoke test file next to the module, run
+through the verify gate), Go (unused imports, wrong constants behind
+failing assertions), and Rust (unused `use` imports, wrong constants
+behind failing `assert_eq!`s). Everything else — security findings from
+bandit, C+ complexity from radon, perf anti-patterns, TODOs, prints — is
+scored, ranked, and surfaced as a typed, file-anchored finding, quarantined
+with evidence or repaired by a model if one is configured.
+
+The Python check set was harvested from the CodeGuardian review system:
+its detectors became strict-parseable checks, its risk scoring and
+suppression became the prioritization layer over the finding queue, its
+Langfuse tracing was rebuilt on real token usage (set `LANGFUSE_PUBLIC_KEY`
+and `LANGFUSE_SECRET_KEY` to activate — inert without them), and its test
+generator became a repair strategy. Both engines run it identically; a
+parity CI test proves it.
 
 ## Invariants (do not break these)
 

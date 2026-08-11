@@ -8,8 +8,10 @@ import { proposePatches } from './propose.js';
 import { runCheck } from './checks.js';
 import { verifyPatch } from './verify.js';
 import { buildImportGraph, scopeOf } from './imports.js';
+import { byRisk, suppressFindings } from './risk.js';
 import { applyEdits } from './patch.js';
 import { createProvider, CRITIC_QUESTIONS, type Provider } from './provider.js';
+import { Tracer } from './tracer.js';
 import { execute, type WorkNode } from './graph.js';
 import { inspect, useBranch, commitFile, logSince, head } from './git.js';
 
@@ -52,6 +54,7 @@ export class Loop {
   private state: RunState;
   private ledger: Ledger;
   private provider: Provider | null = null;
+  private tracer: Tracer = new Tracer();
   /** HEAD before the run, so the final report can list only our commits. */
   private gitBase: string | null = null;
   /** Findings with no untried candidates, quarantined for THIS run only. */
@@ -92,6 +95,12 @@ export class Loop {
 
   async run(): Promise<RunState> {
     this.state.status = 'running';
+    this.tracer = await Tracer.create();
+    this.tracer.startRun({
+      sourceRoot: this.config.sourceRoot,
+      checks: this.config.checks.map((c) => c.name),
+      budget: this.config.budget,
+    });
     try {
       // Before touching anything: if we are going to commit, the tree has to
       // be clean first, or the person cannot tell our edits from their own.
@@ -146,6 +155,7 @@ export class Loop {
       this.state.status = 'failed';
       this.say('settle', `Run failed: ${(err as Error).message}`);
     } finally {
+      this.tracer.flush();
       if (this.config.git && this.gitBase) {
         const commits = await logSince(this.config.sourceRoot, this.gitBase);
         this.say('settle', commits.length
@@ -175,6 +185,12 @@ export class Loop {
         validate: (o: any) => !!o && typeof o === 'object' && 'findings' in o,
         run: async ({ emit }) => {
           const result = await runCheck(check, sourceRoot);
+          this.tracer.span('observe', {
+            check: check.name,
+            durationMs: result.durationMs,
+            findings: result.findings.length,
+            crashed: result.crashed,
+          });
           if (result.crashed) emit(`crashed (exit ${result.exitCode}) — a broken harness, not a defect; not healing`);
           else if (result.findings.length === 0) emit(`clean (${result.durationMs}ms)`);
           else emit(`${result.findings.length} finding(s) (${result.durationMs}ms)`);
@@ -189,7 +205,7 @@ export class Loop {
       job: 'Merge check results into one deduplicated finding list',
       dependsOn: checks.map((c) => `observe:${c.name}`),
       validate: (o: any) => !!o && Array.isArray(o.findings) && o.baseline instanceof Set,
-      run: async ({ deps }) => {
+      run: async ({ deps, emit }) => {
         const findings: Finding[] = [];
         const seen = new Set<string>();
         for (const c of checks) {
@@ -200,8 +216,17 @@ export class Loop {
             findings.push(f);
           }
         }
-        this.state.findings = findings;
-        return { findings, baseline: new Set(findings.map((f) => f.fingerprint)) };
+        // Suppression (generated code, test-file style) filters the queue
+        // before ranking; risk scoring then orders worst-first within each
+        // severity band. Both engines apply the same arithmetic, so the
+        // order they converge in is identical.
+        const { kept, dropped } = suppressFindings(findings);
+        if (dropped.length) {
+          emit(`${dropped.length} finding(s) suppressed (generated code or test-file style)`);
+        }
+        kept.sort(byRisk);
+        this.state.findings = kept;
+        return { findings: kept, baseline: new Set(kept.map((f) => f.fingerprint)) };
       },
     });
 
@@ -223,7 +248,7 @@ export class Loop {
               // would re-target the same dead end every iteration.
               !this.quarantinedThisRun.has(f.fingerprint),
           )
-          .sort(bySeverity);
+          .sort(byRisk);
 
         const quarantined = findings.length - actionable.length;
         if (quarantined > 0) {
@@ -257,6 +282,11 @@ export class Loop {
           try {
             candidates = await this.provider.propose(target, sourceRoot);
             emit(`${this.provider.name} proposed ${candidates.length} candidate(s)`);
+            this.tracer.generation(
+              'propose',
+              (this.provider as any)?.lastUsage ?? null,
+              { check: target.check, candidates: candidates.length },
+            );
           } catch (err) {
             emit(`Model proposer failed: ${(err as Error).message}`);
           }
@@ -370,6 +400,11 @@ export class Loop {
           outcome = v.outcome;
           collateral = v.collateral.map((f) => f.fingerprint);
           collateralDetail = v.collateral.map((f) => `${f.check}: ${f.summary}`);
+          this.tracer.span('verify', {
+            outcome: v.outcome,
+            collateral: collateral.length,
+            durationMs: v.runs.reduce((s, r) => s + r.durationMs, 0),
+          });
         } catch (err) {
           // A failed verification proves nothing, so it cannot count as
           // success. Treat it as a failure and put the file back.
@@ -495,9 +530,4 @@ export class Loop {
   }
 }
 
-const RANK = { blocker: 0, major: 1, minor: 2 } as const;
 
-/** Worst first. */
-function bySeverity(a: Finding, b: Finding): number {
-  return RANK[a.severity] - RANK[b.severity];
-}

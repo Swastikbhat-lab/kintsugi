@@ -20,6 +20,24 @@ def apply_edit(edit, source_root: str):
     if rel.startswith("..") or os.path.isabs(rel):
         raise RuntimeError(f"Patch targets {file}, outside source root {root}")
 
+    # A create edit (test generation) writes a brand-new file and hands
+    # back its deletion as the undo — reverting a failed patch must not
+    # leave an orphaned file behind, any more than it leaves an edited line.
+    if edit.get("create"):
+        if os.path.exists(file):
+            raise RuntimeError(f"Refusing to create {rel}: it already exists")
+        os.makedirs(os.path.dirname(file), exist_ok=True)
+        with open(file, "w", encoding="utf-8", newline="") as fh:
+            fh.write(edit["replace"])
+
+        def restore():
+            try:
+                os.unlink(file)
+            except OSError:
+                pass
+
+        return restore
+
     # newline="" keeps CRLF intact: rules build anchors from split("\n"),
     # so on a CRLF file every anchor line carries a trailing `\r`. A
     # universal-newlines read would strip it and silently lose the match.

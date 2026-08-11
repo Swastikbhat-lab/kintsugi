@@ -19,7 +19,7 @@ const IMPORT_RE = /(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]|re
 // is real for .py files too.
 const PY_IMPORT_RE = /^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))/gm;
 /** Test files are not product importers — they exercise the code, not own it. */
-const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$|(?:^|[/\\])(?:test_|_test)\.py$/;
+const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$|(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$/;
 
 export interface ImportGraph {
   /** absolute file -> absolute files that import it */

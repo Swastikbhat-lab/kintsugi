@@ -25,6 +25,10 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     case 'F401': return unusedPythonImportPatches(finding, sourceRoot);
     case 'I001': return unsortedImportBlockPatches(finding, sourceRoot);
     case 'unused_imports': return unusedRustImportPatches(finding, sourceRoot);
+    case 'T201': return bestPracticePatches(finding, sourceRoot, 'T201');
+    case 'T202': return bestPracticePatches(finding, sourceRoot, 'T202');
+    case 'T203': return bestPracticePatches(finding, sourceRoot, 'T203');
+    case 'T001': return testgenPatches(finding, sourceRoot);
   }
   if (finding.check === 'version') return versionDriftPatches(finding, sourceRoot);
   const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
@@ -379,6 +383,134 @@ function unusedRustImportPatches(finding: Finding, sourceRoot: string): Patch[] 
   return removeLinePatch(finding.file, text, idx, `'${path}' is imported but never used — removing the use.`);
 }
 
+// -------------------------------------------------------------- best practices (T201-T203)
+
+/**
+ * The mechanically fixable best-practices findings from the `py:best-
+ * practices` check. Each rewrite is exact, anchored on the reported line,
+ * and semantically equivalent — the verify gate re-runs the checks, so a
+ * rewrite that disagrees with the language's semantics is reverted, not
+ * shipped.
+ */
+function bestPracticePatches(
+  finding: Finding,
+  sourceRoot: string,
+  kind: 'T201' | 'T202' | 'T203',
+): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length) return [];
+
+  let find = '';
+  let replace = '';
+  let rationale = '';
+
+  if (kind === 'T201') {
+    // `type(x) == T` compares identity, not types — `isinstance` is the
+    // intended check. The RHS guard refuses `type(x) == type(y)`, where
+    // no class is named and the rewrite would be wrong.
+    const m = line.match(/type\(\s*([^)]*?)\s*\)\s*(?:==|is)\s+(?!type\s*\()([A-Za-z_][\w.]*)/);
+    if (!m) return [];
+    find = m[0];
+    replace = `isinstance(${m[1]}, ${m[2]})`;
+    rationale = `type() compares identity, not types — using isinstance().`;
+  } else if (kind === 'T202') {
+    // `len(x) == 0` → `not x`; `len(x) != 0` / `len(x) > 0` → `x`; and the
+    // mirrored `0 == len(x)` forms. Only bare identifiers are rewritten —
+    // an attribute or subscript stays untouched.
+    const fwd = line.match(/\blen\(([A-Za-z_]\w*)\)\s*(==|!=|>)\s*0\b/);
+    const rev = line.match(/\b0\s*(==|!=|<)\s*len\(([A-Za-z_]\w*)\)/);
+    const m = fwd ?? rev;
+    if (!m) return [];
+    // fwd captures (name, op); rev captures (op, name).
+    const name = fwd ? fwd[1] : rev![2];
+    const op = fwd ? fwd[2] : rev![1];
+    find = m[0];
+    replace = op === '==' ? `not ${name}` : name;
+    rationale = `len() comparison against a literal — using truthiness instead.`;
+  } else {
+    // `key in d.keys()` — the keys view is redundant; `in d` is equivalent.
+    const m = line.match(/((?:'[^']*'|"[^"]*"|[A-Za-z_]\w*)\s+in\s+)([A-Za-z_]\w*)\.keys\(\)/);
+    if (!m) return [];
+    find = m[0];
+    replace = `${m[1]}${m[2]}`;
+    rationale = `'in d.keys()' — the keys view is redundant; 'in d' is equivalent.`;
+  }
+
+  return uniqueOrEmpty(finding.file, text, find, replace, rationale);
+}
+
+// -------------------------------------------------------------- test generation (T001)
+
+/**
+ * A function with no tests (`py:testgen` T001). The mechanical answer is
+ * not a rewrite but a *new file*: a smoke test next to the module, covering
+ * every untested top-level function in one patch. The verify gate then runs
+ * pytest — if the module cannot even be imported (missing dependency, bad
+ * name), the new test fails and the file is reverted, which is exactly the
+ * honest signal: "no tests exist AND the module does not import cleanly".
+ */
+function testgenPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file) return [];
+  const stem = basename(finding.file).replace(/\.py$/, '');
+  const testPath = join(dirname(finding.file), `test_${stem}.py`);
+  // The detector only reports modules with no sibling test file; if one has
+  // appeared since, the finding is already resolved.
+  if (existsSync(testPath)) return [];
+
+  const text = readFileSync(finding.file, 'utf8');
+  // Top-level only: `^` at column 0 never matches an indented nested def.
+  const funcs = [...text.matchAll(/^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/gm)]
+    .map((m) => m[1])
+    .filter((n) => !n.startsWith('_'));
+  if (!funcs.length) return [];
+
+  // The import spec follows pytest's sys.path rule: walk up through
+  // package dirs (those with __init__.py); the module is importable as the
+  // dotted path from the first non-package ancestor.
+  const parts = [stem];
+  let d = dirname(finding.file);
+  while (existsSync(join(d, '__init__.py'))) {
+    parts.unshift(basename(d));
+    const parent = dirname(d);
+    if (parent === d) break;
+    d = parent;
+  }
+  const spec = parts.join('.');
+
+  const rel = relative(sourceRoot, finding.file).replace(/\\/g, '/');
+  // Member names sorted case-insensitively (isort's default), so the
+  // generated file is I001-clean and the verify gate has nothing to see.
+  const sorted = [...funcs].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  // Two blank lines between top-level defs (PEP 8) — a generated file must
+  // not introduce style findings in a stricter repo.
+  const body = sorted
+    .map((f) => `def test_${f}_is_importable():\n    assert callable(${f})`)
+    .join('\n\n\n');
+  const content = [
+    `"""Smoke tests for ${rel} — generated by Kintsugi (no coverage found)."""`,
+    '',
+    `from ${spec} import ${sorted.join(', ')}`,
+    '',
+    '',
+    body,
+    '',
+  ].join('\n');
+
+  return [{
+    id: randomUUID().slice(0, 8),
+    file: testPath,
+    find: '',
+    replace: content,
+    create: true,
+    rationale: `No test covers ${rel} — generating a smoke test and letting the checks run it.`,
+    scope: 'local',
+  }];
+}
+
 // -------------------------------------------------------------- assertion → constant
 
 /**
@@ -475,7 +607,7 @@ function findFunctionBody(
     const rel = f.replace(/\\/g, '/');
     if (/(^|[\\/])(node_modules|dist|build|\.git|target)([\\/]|$)/.test(rel)) continue;
     // The defect is in product code, not in the test that caught it.
-    if (lang === 'python' && /(?:^|[/\\])(?:test_|_test)\.py$/.test(rel)) continue;
+    if (lang === 'python' && /(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$/.test(rel)) continue;
     if (lang === 'go' && /\._test\.go$/.test(rel)) continue;
     if (lang === 'rust' && (/(^|[\\/])tests([\\/]|$)/.test(rel) || /(^|[\\/])[^/\\]*_test\.rs$/.test(rel))) continue;
     const file = resolve(sourceRoot, f);

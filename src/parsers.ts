@@ -453,6 +453,58 @@ export function parseRust(output: string, cwd: string, check: string): Finding[]
   return findings;
 }
 
+// ------------------------------------------------------------- radon
+
+/**
+ * radon cyclomatic-complexity output (`radon cc -s --min C`). Unlike the
+ * other parsers, this check is run with `parseOnExit0`: radon always exits
+ * 0 — its findings live in the text, not the status. The plain format is a
+ * per-file header line followed by indented function lines:
+ *
+ *   src\tax.py
+ *       F 1:0 apply_tax - C (11)
+ *       F 5:4 Class.method - B (6)
+ *
+ * Only C+ ranks are emitted by the check command (`--min C`); the parser
+ * also drops A/B defensively, because complexity below C is not a defect a
+ * repair loop should spend an iteration on.
+ */
+export function parseRadon(output: string, cwd: string, check: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = output.split('\n');
+  let file: string | undefined;
+  const headerRe = /^\s*([^\s].*\.py)\s*$/;
+  const fnRe = /^\s+[FMC]\s+(\d+):(\d+)\s+(\S+)\s+-\s+([A-F])\s+\((\d+)\)\s*$/;
+
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '');
+    if (!line) continue;
+    const header = line.match(headerRe);
+    if (header) {
+      file = normalizePath(header[1], cwd);
+      continue;
+    }
+    const m = line.match(fnRe);
+    if (!m || !file) continue;
+    const rank = m[4];
+    if (rank === 'A' || rank === 'B') continue;
+    const cc = Number(m[5]);
+    const name = m[3];
+    const message = `cyclomatic complexity ${rank} (${cc}): ${name}`;
+    findings.push({
+      fingerprint: fingerprint(check, file, `CC_${rank}`, message),
+      check,
+      severity: 'minor',
+      summary: message,
+      file,
+      line: Number(m[1]),
+      code: `CC_${rank}`,
+      evidence: { message, rank, complexity: cc, name },
+    });
+  }
+  return findings;
+}
+
 /** Lift a machine code and the bare message out of a rust diagnostic line. */
 function rustDiagnostic(line: string): { code?: string; text: string } {
   // `error[E0425]: …` carries a real code; `error: …` is a denied lint

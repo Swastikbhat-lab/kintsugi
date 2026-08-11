@@ -69,11 +69,18 @@ Exit code `0` when nothing actionable remains, `1` while defects do — so it
 gates a pipeline. `--quarantined-ok` treats quarantine (a human decision)
 as success.
 
-## Install it as a Claude skill
+## Install it as a Claude skill (or plugin)
 
 ```bash
 mkdir -p ~/.claude/skills
 cp -r skills/kintsugi ~/.claude/skills/kintsugi
+```
+
+Or install the whole repo as a **Claude Code plugin** — the skill and the
+agent fleet ship inside it:
+
+```bash
+claude plugin install Swastikbhat-lab/kintsugi
 ```
 
 Claude Code (or any agent that reads skills) then knows the loop exists,
@@ -96,10 +103,20 @@ The contract with a check is one sentence: **give me typed failures**. A
 engine detects the repo's toolchain and runs what its own scripts offer:
 
 - **npm** — `typecheck` + `test` from `package.json` scripts
-- **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
+- **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware; plus
+  `py:bandit` (security) and `py:radon` (complexity) when those tools are
+  installed, and `py:perf` / `py:best-practices` / `py:testgen` — the
+  engine's own stdlib-only scanners, always on
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
 - **Rust** — `rs:test` (`cargo test`) and `rs:lint` (`cargo clippy -D warnings`)
 - **Mixed** repos get the union of their toolchains
+
+The Python check set was harvested from the CodeGuardian review system:
+its security/complexity/perf/best-practice detectors became strict-parseable
+checks, its risk scoring and suppression became the prioritization layer
+over the finding queue, its Langfuse tracing was rebuilt on *real* token
+usage, and its test generator became a repair strategy — every fix still
+proven by re-running the checks.
 
 **Two engines, one loop.** The orchestrator is TypeScript (agent graph
 concurrency, all languages); the **Python engine** (`py/`) is a faithful
@@ -147,6 +164,9 @@ that crashes with no output is a broken harness — reported, never healed.
 | Unused imports (Python `F401`, Go, Rust `use`) | remove the import line | rule |
 | Unsorted import blocks (Python `I001`) | sort them isort-style | rule |
 | Wrong constant behind a failing assertion (Python/Go/Rust `assert_eq!`) | recompute from the assertion's own numbers | rule |
+| `type(x) == T`, `len(x) == 0`, `key in d.keys()` (Python `T201`/`T202`/`T203`) | rewrite to `isinstance`, truthiness, `in d` | rule |
+| Functions with no tests (Python `T001`) | generate a smoke test next to the module, then run it | rule |
+| Hardcoded secrets, shell usage (bandit), C+ complexity (radon), perf anti-patterns, TODOs/prints | — | scored, ranked, surfaced (quarantined with evidence) |
 | Wrong behaviour behind a failing test | rewrite the code | model, then **verified** |
 | Missing functions, missing features | — | quarantined with evidence |
 
@@ -184,11 +204,12 @@ remembers — and quarantines the sixth. The evidence from a real run is in
 
 ## What's next (honestly)
 
-- **Watch mode** — the v1 cadence that keeps a repo repaired as it drifts.
 - **More rule classes** — every mechanically-fixable check (formatting, dead
   code, deprecations) is one more arm in `src/propose.ts`.
 - **A live model run** — the Anthropic seam is built and degrades safely,
   but is only exercised through the mock so far.
+- **Langfuse traces end-to-end** — the tracer is wired and inert without
+  keys; a live dashboard needs a project with `LANGFUSE_*` env set.
 
 ## The point
 

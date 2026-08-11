@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { CheckDef, CheckResult } from './types.js';
-import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust } from './parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust, parseRadon } from './parsers.js';
 
 /**
  * ANSI CSI color sequences — CI hosts force tool color (`CARGO_TERM_COLOR=
@@ -72,11 +72,20 @@ export function runCheck(
       const durationMs = Date.now() - started;
       // Exit 0 means the check passed — its output may still *look* like
       // findings (a version check that prints "version: ok"), but a passing
-      // check contributes no findings by definition.
+      // check contributes no findings by definition. Except when the check
+      // declares parseOnExit0 (analysis tools like radon always exit 0 —
+      // their findings live in the text, not the status).
+      // pytest exits 5 with "no tests ran" for an empty suite — that is a
+      // clean state, not a defect and not a broken harness, and it must not
+      // block the verify gate (test generation exists precisely to give a
+      // testless repo its first tests).
+      const emptySuite = /no tests ran/i.test(output);
       // Crash means *no typed output at all* — a broken harness. Exit non-zero
       // with parseable findings is a defect, even when the filter below drops
       // every one of them (another check owns that defect class).
-      const parsed = code === 0 ? [] : parseWithFallback(def, output, cwd);
+      const parsed = emptySuite || (code === 0 && !def.parseOnExit0)
+        ? []
+        : parseWithFallback(def, output, cwd);
       // A check owns its defect class: tsc-based lint only keeps the codes
       // it was configured for, so the same type error is not reported twice
       // by two checks and repaired (or quarantined) twice. A configured
@@ -91,7 +100,7 @@ export function runCheck(
         findings,
         exitCode: killed ? -2 : (code ?? -1),
         durationMs,
-        crashed: killed || (code !== 0 && parsed.length === 0),
+        crashed: killed || (!emptySuite && code !== 0 && parsed.length === 0),
         output,
       });
     });
@@ -105,6 +114,7 @@ function parse(def: CheckDef, output: string, cwd: string) {
     case 'lines': return parseLines(output, cwd, def.name);
     case 'strict': return parseStrict(output, cwd, def.name);
     case 'rust': return parseRust(output, cwd, def.name);
+    case 'radon': return parseRadon(output, cwd, def.name);
     default: return [];
   }
 }

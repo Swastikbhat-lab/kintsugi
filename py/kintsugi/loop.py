@@ -14,6 +14,7 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import cmp_to_key
 
 from .checks import run_check
 from .git import commit_file, head, inspect, use_branch
@@ -22,13 +23,9 @@ from .ledger import Ledger, ledger_path_for
 from .patch import apply_edits
 from .propose import propose_patches
 from .provider import CRITIC_QUESTIONS, create_provider
+from .risk import by_risk, suppress_findings
+from .tracer import Tracer
 from .verify import verify_patch
-
-_RANK = {"blocker": 0, "major": 1, "minor": 2}
-
-
-def _by_severity(f: dict):
-    return _RANK.get(f["severity"], 3)
 
 
 def _iso_now() -> str:
@@ -52,6 +49,7 @@ class Loop:
         self.git_base = None
         self.quarantined_this_run = set()
         self.provider = None
+        self.tracer = Tracer.create()
 
     def say(self, phase: str, message: str) -> None:
         self.emit({
@@ -108,9 +106,28 @@ class Loop:
                 self.say("settle", "Continuing rules-only. Findings with no mechanical rule will be reported, not fixed.")
                 self.provider = None
 
+        self.tracer.start_run(self.config)
+
         checks = self.config["checks"]
         runs = self._run_all(checks, source_root)
-        findings = sorted((f for r in runs for f in r["findings"]), key=_by_severity)
+        for r in runs:
+            self.tracer.span(
+                "observe",
+                check=r["check"],
+                durationMs=r["durationMs"],
+                findings=len(r["findings"]),
+                crashed=r["crashed"],
+            )
+        findings = [f for r in runs for f in r["findings"]]
+        # Suppression (generated code, test-file style) filters the queue
+        # before ranking; risk scoring then orders worst-first within each
+        # severity band. Both engines apply the same arithmetic, so the
+        # order they converge in is identical.
+        filtered = suppress_findings(findings)
+        if filtered["dropped"]:
+            self.say("observe",
+                f"{len(filtered['dropped'])} finding(s) suppressed (generated code or test-file style)")
+        findings = sorted(filtered["kept"], key=cmp_to_key(by_risk))
         self.state["findings"] = findings
         baseline = {f["fingerprint"] for f in findings}
 
@@ -121,6 +138,7 @@ class Loop:
         if self.config.get("dryRun"):
             self._dry_survey(findings, source_root)
             self.state["status"] = "converged"
+            self.tracer.flush()
             return self.state
 
         max_iterations = int(self.config.get("maxIterations", 12))
@@ -131,6 +149,7 @@ class Loop:
                 self.say("diagnose", "Nothing actionable left. Converged.")
                 self.state["status"] = "converged"
                 self.say("settle", "Converged.")
+                self.tracer.flush()
                 return self.state
 
             self.say("diagnose", f"Targeting {target['check']}: {target['summary']}")
@@ -138,6 +157,7 @@ class Loop:
 
         self.state["status"] = "exhausted"
         self.say("settle", f"Iteration budget ({max_iterations}) reached")
+        self.tracer.flush()
         return self.state
 
     def _run_all(self, checks, source_root):
@@ -167,6 +187,11 @@ class Loop:
             try:
                 candidates = self.provider.propose(target, source_root)
                 self.say("verify", f"{self.provider.name} proposed {len(candidates)} candidate(s)")
+                self.tracer.generation(
+                    "propose",
+                    getattr(self.provider, "last_usage", None),
+                    check=target["check"], candidates=len(candidates),
+                )
             except Exception as err:
                 self.say("verify", f"Model proposer failed: {err}")
                 candidates = []
@@ -239,6 +264,12 @@ class Loop:
             collateral = [f["fingerprint"] for f in v["collateral"]]
             collateral_detail = [f"{f['check']}: {f['summary']}" for f in v["collateral"]]
             runs = v["runs"]
+            self.tracer.span(
+                "verify",
+                outcome=v["outcome"],
+                collateral=len(v["collateral"]),
+                durationMs=sum(r["durationMs"] for r in v["runs"]),
+            )
         except Exception as err:
             # A failed verification proves nothing, so it cannot count as
             # success. Treat it as a failure and put the file back.
@@ -273,10 +304,11 @@ class Loop:
 
         # Refresh findings from the verify run so cleared findings disappear
         # and collateral appears — the next target is chosen from reality.
+        # The same suppression + risk ordering as the initial observe pass.
         if runs is not None:
-            self.state["findings"] = sorted(
-                (f for r in runs for f in r["findings"]), key=_by_severity,
-            )
+            fresh = [f for r in runs for f in r["findings"]]
+            filtered = suppress_findings(fresh)
+            self.state["findings"] = sorted(filtered["kept"], key=cmp_to_key(by_risk))
 
     # ------------------------------------------------------------- dry survey
 

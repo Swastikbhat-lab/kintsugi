@@ -43,7 +43,9 @@ test('the loop repairs a Python fixture: stale constant, unsorted imports, unuse
   const source = mkdtempSync(join(tmpdir(), 'kintsugi-py-loop-'));
   mkdirSync(join(source, 'src'), { recursive: true });
   const files: Record<string, string> = {
-    'pyproject.toml': '[project]\nname = "tax-demo"\nversion = "0.1.0"\n',
+    // isort's I001 is not in ruff's default selection before 0.16, so the
+    // fixture selects it explicitly — the test must pass on any ruff.
+    'pyproject.toml': '[project]\nname = "tax-demo"\nversion = "0.1.0"\n\n[tool.ruff.lint]\nselect = ["E4", "E7", "E9", "F", "I"]\n',
     'src/tax.py': 'def apply_tax(amount: float) -> float:\n    return amount * 0.08\n',
     'src/util.py': 'import os\n\n\ndef greet(name: str) -> str:\n    return f"hello {name}"\n',
     'src/app.py': 'import sys\nimport os\n\n\ndef run() -> str:\n    return f"{os.name}:{sys.platform}"\n',

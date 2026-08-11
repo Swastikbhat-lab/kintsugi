@@ -173,6 +173,9 @@ class ClaudeProvider:
     def __init__(self, client):
         self.client = client
         self.degraded = False
+        # The usage the most recent model call reported — the tracer's
+        # numbers. Real usage straight from the response, never a guess.
+        self.last_usage = None
 
     @staticmethod
     def create():
@@ -227,6 +230,13 @@ class ClaudeProvider:
                 raise
             self.degraded = True
             res = self.client.beta.messages.create(**base, output_config=structured)
+
+        usage = getattr(res, "usage", None)
+        if usage is not None:
+            self.last_usage = {
+                "inputTokens": int(getattr(usage, "input_tokens", 0) or 0),
+                "outputTokens": int(getattr(usage, "output_tokens", 0) or 0),
+            }
 
         if getattr(res, "stop_reason", None) == "refusal":
             return None
