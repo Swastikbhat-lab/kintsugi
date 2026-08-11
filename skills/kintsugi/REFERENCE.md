@@ -48,12 +48,16 @@ virtualenvs (`.venv`/`venv`/`site-packages`) and Python caches are never
 findings, and pytest `warnings summary` lines (`path:line: XxxWarning: …`)
 are ignored — a noisy suite must not surface phantom defects.
 
-**Two engines, one loop.** The TypeScript engine (`src/`) is the full
-orchestrator; the Python engine (`py/`, `python -m kintsugi` from `py/`) is
-a faithful port of the check runner and repair rules for non-Node repos.
-`run-loop.sh` auto-dispatches Python-only repos to it — the Python path
-needs no Node runtime at all. Both share the ledger format, report shape,
-and exit-code contract.
+**Two engines, one loop.** The TypeScript engine (`src/`) is the
+orchestrator (agent graph concurrency); the Python engine (`py/`,
+`python -m kintsugi` from `py/`) is a faithful port for non-Node repos —
+check runner, repair rules, verify gate, ledger, watch mode (polling-based,
+`--watch`/`--interval`), and the model proposer (optional `anthropic` SDK,
+or `--llm-mock <path>` for keyless runs). `run-loop.sh` auto-dispatches
+Python-only repos to it — the Python path needs no Node runtime at all.
+Both share the ledger format, report shape, and exit-code contract, and
+run the same propose -> critics -> gate -> verify flow when a provider is
+configured.
 
 A check that exits non-zero with no parseable finding is a **crash** — the
 loop reports it and never heals it. One exception is built in: if the

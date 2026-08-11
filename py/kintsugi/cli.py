@@ -2,9 +2,12 @@
 
     python -m kintsugi --source <repo> --dry
     python -m kintsugi --source <repo>
+    python -m kintsugi --source <repo> --llm-mock proposals.json
+    python -m kintsugi --source <repo> --watch
 
-The flags mirror the TypeScript engine's CLI (minus the Node-only features:
-watch mode and the model proposer). Same report shape, same exit codes.
+The flags mirror the TypeScript engine's CLI. Same report shape, same exit
+codes. Watch mode is polling-based (the stdlib has no recursive fs.watch)
+but keeps the same debounce / serial-run / echo-suppression semantics.
 """
 
 import json
@@ -36,6 +39,9 @@ _USAGE = (
     "  --branch <name>      branch to use with --git (default kintsugi/fixes)\n"
     "  --json               machine-readable final report on stdout\n"
     "  --list-checks        print the checks that would run, then exit\n"
+    "  --llm-mock <path>    replay canned proposals (keyless demo/tests)\n"
+    "  --watch              keep repairing as the repo drifts (Ctrl+C to stop)\n"
+    "  --interval <secs>    with --watch: also re-check every N seconds\n"
 )
 
 _ICON = {"observe": "◎", "diagnose": "◆", "repair": "✎", "verify": "⟳", "settle": "■"}
@@ -63,9 +69,12 @@ def _parse_args(argv):
 def main(argv=None):
     # The phase icons are non-ASCII; a redirected Windows console defaults
     # to cp1252 and would crash printing them. UTF-8 everywhere, always.
+    # line_buffering keeps watch mode's progress visible when piped (a
+    # block-buffered stdout would swallow every line until exit, which for a
+    # long-running watch process is never).
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
     argv = sys.argv[1:] if argv is None else argv
@@ -96,6 +105,7 @@ def main(argv=None):
         "maxIterations": int(args.get("max") or loaded["maxIterations"]),
         "dryRun": "dry" in args,
         "allowShared": "allow-shared" in args,
+        "llmMock": args.get("llm-mock"),
         "statePath": os.path.abspath(args["state"]) if args.get("state") else None,
         "git": "git" in args,
         "branch": args.get("branch"),
@@ -106,17 +116,62 @@ def main(argv=None):
         icon = _ICON.get(e["phase"], "·")
         print(f"  {icon} [{e['iteration']}] {e['phase'].ljust(8)} {e['message']}")
 
-    loop = Loop(config, say)
-    state = loop.run()
-    summary = summarise(state, loop.actionable_remaining())
+    def run_once():
+        loop = Loop(config, say)
+        state = loop.run()
+        summary = summarise(state, loop.actionable_remaining())
+        if args.get("json"):
+            # Raw UTF-8, not \u escapes: the TS engine's JSON.stringify
+            # emits non-ASCII as UTF-8 bytes, and stdout is reconfigured to
+            # UTF-8 above — so the machine report is byte-identical across
+            # engines.
+            print(json.dumps(report_json(summary, source_root), indent=2, ensure_ascii=False))
+        else:
+            lines = summary_lines(summary, source_root)
+            print("\n  " + "\n  ".join(lines) + "\n")
+        return exit_code_for(summary, config["quarantinedOk"]), state
 
-    if args.get("json"):
-        # Raw UTF-8, not \u escapes: the TS engine's JSON.stringify emits
-        # non-ASCII as UTF-8 bytes, and stdout is reconfigured to UTF-8
-        # above — so the machine report is byte-identical across engines.
-        print(json.dumps(report_json(summary, source_root), indent=2, ensure_ascii=False))
-    else:
-        lines = summary_lines(summary, source_root)
-        print("\n  " + "\n  ".join(lines) + "\n")
+    if "watch" not in args:
+        return run_once()[0]
 
-    return exit_code_for(summary, config["quarantinedOk"])
+    # ---- watch mode: keep the repo repaired as it drifts ---------------
+    import time
+
+    from .watch import WatchSession, changed_paths, snapshot_tree
+
+    debounce_ms = 2000
+    interval_secs = float(args.get("interval") or 0)
+    interval_ms = int(interval_secs * 1000) if interval_secs > 0 else 0
+
+    def on_run():
+        # The files this pass wrote are the loop's own echo — the session
+        # drops their events so a repair never re-triggers itself.
+        _, state = run_once()
+        return [a["patch"]["file"] for a in state["attempts"] if a["patch"].get("file")]
+
+    session = WatchSession(
+        debounce_ms=debounce_ms,
+        interval_ms=interval_ms,
+        on_run=on_run,
+        log=lambda msg: print(f"  ⌁ {msg}"),
+    )
+    print(f"  Watching {source_root} — Ctrl+C to stop. A change is checked "
+          f"{debounce_ms / 1000}s after it settles.")
+    print("  (Python engine watches by polling — no recursive fs.watch in the stdlib)")
+    session.start()
+    cadence = max(interval_ms or 5000, debounce_ms) / 1000.0
+    prev = snapshot_tree(source_root)
+    try:
+        while True:
+            time.sleep(cadence)
+            now = time.monotonic()
+            next_tree = snapshot_tree(source_root)
+            changed = changed_paths(prev, next_tree)
+            if changed:
+                prev = next_tree
+                for p in changed:
+                    session.on_change(p)
+            session.tick(now)
+    except KeyboardInterrupt:
+        session.close()
+    return 0

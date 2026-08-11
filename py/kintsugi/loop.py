@@ -21,6 +21,7 @@ from .imports import build_import_graph, scope_of
 from .ledger import Ledger, ledger_path_for
 from .patch import apply_edits
 from .propose import propose_patches
+from .provider import CRITIC_QUESTIONS, create_provider
 from .verify import verify_patch
 
 _RANK = {"blocker": 0, "major": 1, "minor": 2}
@@ -50,6 +51,7 @@ class Loop:
         self.ledger = Ledger(config.get("statePath") or ledger_path_for(config["sourceRoot"]))
         self.git_base = None
         self.quarantined_this_run = set()
+        self.provider = None
 
     def say(self, phase: str, message: str) -> None:
         self.emit({
@@ -88,7 +90,23 @@ class Loop:
             use_branch(source_root, branch)
             self.say("settle", f"Committing to branch {branch} (was on {repo.get('branch') or 'detached HEAD'})")
 
-        self.say("settle", "No model configured — running rules-only (every patch is still verified the same way)")
+        # Establish up front whether the model path works, rather than
+        # letting a bad credential masquerade as the model having nothing to
+        # suggest. A config may inject a provider object directly (tests);
+        # otherwise build one from --llm-mock or the installed SDK.
+        self.provider = self.config.get("provider") or create_provider(self.config)
+        if self.provider is None:
+            self.say("settle", "No model configured — running rules-only (every patch is still verified the same way)")
+        elif self.provider.name == "mock":
+            self.say("settle", "Model proposer: mock — rules first, replayed proposals for what rules cannot reach")
+        else:
+            check = self.provider.preflight()
+            if check.get("ok"):
+                self.say("settle", f"Model proposer {check['detail']} — rules first, model for what rules cannot reach")
+            else:
+                self.say("settle", f"Model proposer unavailable: {check['detail']}")
+                self.say("settle", "Continuing rules-only. Findings with no mechanical rule will be reported, not fixed.")
+                self.provider = None
 
         checks = self.config["checks"]
         runs = self._run_all(checks, source_root)
@@ -140,7 +158,18 @@ class Loop:
     # ------------------------------------------------------------- process
 
     def _process(self, target, checks, source_root, baseline):
+        # Rules first: free, instant, and proven on these classes.
         candidates = propose_patches(target, source_root)
+
+        # The model is consulted only for what the rules could not reach.
+        if not candidates and self.provider:
+            self.say("verify", f"No rule covers {target.get('code') or target['check']} — asking {self.provider.name}")
+            try:
+                candidates = self.provider.propose(target, source_root)
+                self.say("verify", f"{self.provider.name} proposed {len(candidates)} candidate(s)")
+            except Exception as err:
+                self.say("verify", f"Model proposer failed: {err}")
+                candidates = []
 
         # Blast radius is decided now, from what the file is — a repair that
         # touches a module other files import changes code the loop is not
@@ -159,6 +188,28 @@ class Loop:
             return
 
         patch = viable[0]
+
+        # Three critic agents, fresh context, in parallel. Only a provider
+        # that can judge is consulted; abstaining is "keep", which is safe
+        # because the deterministic verify gate still runs afterwards.
+        critique = getattr(self.provider, "critique", None) if self.provider else None
+        if critique:
+            def ask(question):
+                try:
+                    return critique(patch, target, question)
+                except Exception as err:
+                    self.say("verify", f"critic failed: {err}")
+                    return None
+            with ThreadPoolExecutor(max_workers=len(CRITIC_QUESTIONS)) as ex:
+                verdicts = list(ex.map(ask, CRITIC_QUESTIONS))
+            drops = sum(1 for v in verdicts if v and v.get("verdict") == "drop")
+            if drops:
+                self.say("verify", f"{drops}/{len(CRITIC_QUESTIONS)} checks voted drop — "
+                          f"{'proceeding' if drops < 2 else 'rejecting'}")
+            if drops >= 2:  # majority of three
+                self.say("verify", "Critic agents rejected the patch — recording and moving on")
+                self.record(target, patch, "unverifiable", [])
+                return
 
         # A shared file is out of scope for an automatic fix, however cleanly
         # it would clear the check. Editing it moves code the loop is not
@@ -270,7 +321,7 @@ class Loop:
             "outcome": outcome,
             "at": _iso_now(),
             "collateral": collateral,
-            "provider": False,
+            "provider": bool(self.provider),
         }
         self.ledger.record(attempt)
         self.state["attempts"].append(attempt)
