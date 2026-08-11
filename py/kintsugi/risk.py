@@ -19,7 +19,7 @@ import re
 _SECURITY = re.compile(r"^B\d{3}$")
 _COMPLEXITY = re.compile(r"^CC_[CDEF]$")
 _PERF = re.compile(r"^P\d{3}$")
-_FIXABLE = re.compile(r"^(T201|T202|T203|T001)$")
+_FIXABLE = re.compile(r"^(T201|T202|T203|T001|T105|B105|B324)$")
 _IMPORT = re.compile(r"^(F401|I001|unused_imports)$")
 _HARDCODED = re.compile(r"hardcoded (password|secret|key|token)|api[_-]?key|aws[_-]?secret")
 
@@ -104,16 +104,33 @@ def by_risk(a: dict, b: dict) -> int:
 _GENERATED = re.compile(r"generated|_gen\.|migrations/|vendor/", re.IGNORECASE)
 _STYLE = re.compile(r"^(T\d{3}|P\d{3}|CC_[A-F])$")
 _TEST_FILE = re.compile(r"(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$")
+# Complexity is expected in domain-heavy files (a parser, a crypto wrapper, a
+# transform pipeline) — a CC finding there is not a defect a repair loop can
+# act on, and it would otherwise squat at the top of the queue forever.
+_DOMAIN_FILE = re.compile(r"parser|model|crypto|transform", re.IGNORECASE)
+_COMPLEXITY_CODE = re.compile(r"^CC_[A-F]$")
 
 
 def suppress_findings(findings):
     """Split findings into kept / dropped. Dropped ones never enter the
-    queue — they are noise a repair loop should not burn an iteration on."""
+    queue — they are noise a repair loop should not burn an iteration on.
+
+    Three suppression families (mirroring CodeGuardian's SuppressionEngine):
+    generated code (nobody should patch machine output by hand), style
+    findings inside test files (relaxed rules are conventional there), and
+    complexity findings in domain-heavy files (parsers/models/crypto/
+    transforms are *supposed* to be complex). Real test failures are never
+    suppressed — only style codes are, never `py:test` results."""
     kept = []
     dropped = []
     for f in findings:
         file = f.get("file") or ""
+        code = f.get("code") or ""
         generated = _GENERATED.search(file) is not None
-        test_style = _TEST_FILE.search(file) is not None and _STYLE.match(f.get("code") or "") is not None
-        (dropped if (generated or test_style) else kept).append(f)
+        test_style = _TEST_FILE.search(file) is not None and _STYLE.match(code) is not None
+        domain_complexity = (
+            _COMPLEXITY_CODE.match(code) is not None
+            and _DOMAIN_FILE.search(file) is not None
+        )
+        (dropped if (generated or test_style or domain_complexity) else kept).append(f)
     return {"kept": kept, "dropped": dropped}

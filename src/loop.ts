@@ -222,7 +222,7 @@ export class Loop {
         // order they converge in is identical.
         const { kept, dropped } = suppressFindings(findings);
         if (dropped.length) {
-          emit(`${dropped.length} finding(s) suppressed (generated code or test-file style)`);
+          emit(`${dropped.length} finding(s) suppressed (generated, test-file style, or expected domain complexity)`);
         }
         kept.sort(byRisk);
         this.state.findings = kept;

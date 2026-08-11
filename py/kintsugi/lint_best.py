@@ -30,7 +30,12 @@ _SKIP = re.compile(
 )
 
 # (regex, code, message). T2xx are mechanically fixable — the proposer has
-# exact rules for each; T1xx are advisory (they need intent).
+# exact rules for each; T1xx are advisory (they need intent). T105 is the
+# hardcoded-secret class, detected separately in scan_file: bandit's B105
+# misses API_KEY-style names, so the engine's own scanner catches the gap —
+# but only when the value *looks* like a secret (a vendor prefix such as
+# sk-/AKIA/ghp_, or a long mixed-case/digit/punct run with no spaces).
+# CACHE_KEY = "cart" stays alone; API_KEY = "sk-live-3f9a2c…" does not.
 _PATTERNS = [
     (re.compile(r"\b(?:TODO|FIXME|XXX)\b"), "T101", "TODO/FIXME comment found"),
     (re.compile(r"\bprint\s*\("), "T102", "use logging instead of print"),
@@ -42,6 +47,25 @@ _PATTERNS = [
      "T203", "use 'in d' instead of 'in d.keys()'"),
 ]
 
+# Secret-looking values: vendor prefixes (OpenAI sk-, AWS AKIA, GitHub
+# ghp_/gho_/ghu_/ghs_/ghr_, JWTs eyJ…, Slack xox…), or any long run of
+# mixed-case letters, digits, and underscores/hyphens (entropy suggests a
+# key, not a word). Values with spaces are never secrets.
+_T105_VALUE = re.compile(
+    r"(?:sk-[A-Za-z0-9_\-]{10,}|AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"eyJ[A-Za-z0-9_\-]{10,}\.|xox[baprs]-[A-Za-z0-9\-]{10,}|"
+    r"(?=[A-Za-z0-9_\-]{20,}$)(?=[^a-z]*[A-Z0-9])[A-Za-z0-9_\-]{20,})"
+)
+
+# `NAME = "value"` assignments whose NAME smells like a credential
+# (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL/AUTH) — the smell is checked only
+# after the value has already matched _T105_VALUE, so a benign CACHE_KEY is
+# never touched.
+_T105_ASSIGN = re.compile(
+    r"^[ \t]*([A-Za-z_][\w]*)\s*=\s*(['\"])(.*?)\2\s*(?:#.*)?$"
+)
+_T105_NAME = re.compile(r"(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH)")
+
 
 def scan_file(path: str, rel: str):
     try:
@@ -51,6 +75,11 @@ def scan_file(path: str, rel: str):
         return []
     out = []
     for i, line in enumerate(lines, 1):
+        # Hardcoded-secret check first (most specific): NAME = "<secret>".
+        m = _T105_ASSIGN.match(line)
+        if m and _T105_NAME.search(m.group(1)) and _T105_VALUE.search(m.group(3)):
+            out.append(f"{rel}:{i}: T105 hardcoded secret in assignment to {m.group(1)}")
+            continue
         for rx, code, message in _PATTERNS:
             if rx.search(line):
                 out.append(f"{rel}:{i}: {code} {message}")

@@ -29,6 +29,9 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     case 'T202': return bestPracticePatches(finding, sourceRoot, 'T202');
     case 'T203': return bestPracticePatches(finding, sourceRoot, 'T203');
     case 'T001': return testgenPatches(finding, sourceRoot);
+    case 'T105': return hardcodedSecretPatches(finding, sourceRoot);
+    case 'B105': return hardcodedSecretPatches(finding, sourceRoot);
+    case 'B324': return banditPatches(finding, sourceRoot, 'B324');
   }
   if (finding.check === 'version') return versionDriftPatches(finding, sourceRoot);
   const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
@@ -665,6 +668,97 @@ function extractBody(text: string, sigIndex: number, lang: 'python' | 'go' | 'ru
     body.push(l);
   }
   return body.join('\n');
+}
+
+// -------------------------------------------------------- security (B105/B324/T105)
+
+/**
+ * `API_KEY = "sk-live-…"` — a hardcoded credential (bandit B105, or the
+ * engine's own T105 for names bandit misses). Replace the literal with an
+ * os.environ lookup (random fallback keeps the assignment a non-empty
+ * string) and ensure `import os` exists. Bandit re-runs clean on the env
+ * form, so the verify gate commits it.
+ */
+// Secret-looking values, mirrored from lint_best._T105_VALUE so the
+// scanner and the proposer apply exactly the same gate: vendor prefixes
+// (sk-, AKIA, ghp_, eyJ…, xox…), or a long mixed-case/digit run (entropy
+// suggests a key). The entropy arm requires an uppercase or digit —
+// "a-very-long-benign-value" is not a key, "hunter2hunter2hunter2" is.
+const SECRET_VALUE =
+  /(?:sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}\.|xox[baprs]-[A-Za-z0-9-]{10,}|(?=[A-Za-z0-9_-]{20,}$)(?=[^a-z]*[A-Z0-9])[A-Za-z0-9_-]{20,})/;
+
+// Classic credential names bandit's B105 keys on — a short value on these
+// is still a credential (PASSWORD = "hunter2"), unlike CACHE_KEY = "cart".
+const CLASSIC_SECRET_NAME = /PASSWORD|SECRET|TOKEN|CREDENTIAL/;
+
+function hardcodedSecretPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length) return [];
+  const m = line.match(/^([ \t]*)([A-Za-z_]\w*)\s*=\s*(['"])([^'"]{4,})\3\s*(?:#.*)?$/);
+  if (!m) return [];
+  const indent = m[1];
+  const name = m[2];
+  const value = m[4];
+  // B105 additionally flags short passwords on classic names; T105 only
+  // fires on entropy-like values, so its findings never hit this arm.
+  const allowClassic = finding.check === 'py:bandit';
+  const secretLike = SECRET_VALUE.test(value) ||
+    (allowClassic && value.length >= 4 && CLASSIC_SECRET_NAME.test(name));
+  if (!secretLike) return [];
+  const env = `${indent}${name} = os.environ.get("${name.toUpperCase()}", "${randomUUID().replace(/-/g, '')}")`;
+  const patch = mkPatch(
+    finding.file, line, env,
+    `hardcoded secret ${name} moved to os.environ ('${name.toUpperCase()}')`,
+  );
+  // Companion edit, not a second candidate: the loop applies [patch] +
+  // patch.also as one unit, so without this the env lookup would land on
+  // an undefined `os` and the verify gate would correctly revert (F821).
+  if (!/(^|\n)\s*import os\b/.test(text)) {
+    const head = lines[0] ?? '';
+    patch.also = [mkPatch(
+      finding.file, head, `import os\n${head}`,
+      'os.environ lookup needs the os import.',
+    )];
+  }
+  return [patch];
+}
+
+// bandit B324: `hashlib.sha1(x)` without usedforsecurity → add the flag.
+// Only sha1/md5/sha224/sha384; the py engine proves bandit re-runs clean.
+const WEAK_HASH_CALL =
+  /^([ \t]*)(?:return\s+)?([A-Za-z_][\w.]*\.(?:sha1|md5|sha224|sha384))\(([^)]*)\)(.*)$/;
+
+function banditPatches(finding: Finding, sourceRoot: string, code: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length) return [];
+
+  if (code === 'B324') {
+    if (line.includes('usedforsecurity')) return [];
+    const m = line.match(WEAK_HASH_CALL);
+    if (!m) return [];
+    const indent = m[1];
+    const ret = m[2] !== undefined ? m[2] : ''; // 'return ' when present
+    const callee = m[3];
+    const args = m[4].trim();
+    const tail = m[5];
+    const inner = args ? `${args}, ` : '';
+    const replace = `${indent}${ret}${callee}(${inner}usedforsecurity=False)${tail}`;
+    if (replace === line) return [];
+    return [mkPatch(
+      finding.file, line, replace,
+      'bandit B324: weak hash is used for security — explicit ' +
+        'usedforsecurity=False scopes it to non-security use.',
+    )];
+  }
+  return [];
 }
 
 // -------------------------------------------------------------- helpers

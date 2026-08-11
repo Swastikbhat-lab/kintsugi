@@ -19,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 PY_MARKERS = ["pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "poetry.lock"]
 _REQ_RE = re.compile(r"^requirements.*\.txt$")
@@ -162,15 +163,6 @@ def python_checks(source_root: str, probe=probe_command):
             "parser": "strict",
             "severity": "major",
         })
-    if probe("radon --version"):
-        checks.append({
-            "name": "py:radon",
-            "command": "radon cc -s --min C .",
-            "parser": "radon",
-            "severity": "minor",
-            "parseOnExit0": True,
-        })
-
     # The engine's own stdlib-only scanners need no third-party tool, just
     # a Python interpreter — so they are always on for Python repos (the
     # script's existence is the only other gate). Test-generation detection
@@ -180,6 +172,18 @@ def python_checks(source_root: str, probe=probe_command):
         if probe(f'{interp} -c "import ast"'):
             any_py = interp
             break
+    if any_py and probe("radon --version"):
+        # radon loads pyproject.toml at import time and crashes on invalid
+        # TOML — the wrapper hides a broken config for the run and restores
+        # it, so the check works on repos with a stray/malformed
+        # pyproject.toml instead of silently reporting nothing.
+        checks.append({
+            "name": "py:radon",
+            "command": f'{any_py} "{_PY_SCRIPT("radon_wrap.py")}"',
+            "parser": "radon",
+            "severity": "minor",
+            "parseOnExit0": True,
+        })
     if any_py and os.path.exists(_PY_SCRIPT("lint_perf.py")):
         checks.append({
             "name": "py:perf",

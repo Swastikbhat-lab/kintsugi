@@ -126,7 +126,7 @@ class Loop:
         filtered = suppress_findings(findings)
         if filtered["dropped"]:
             self.say("observe",
-                f"{len(filtered['dropped'])} finding(s) suppressed (generated code or test-file style)")
+                f"{len(filtered['dropped'])} finding(s) suppressed (generated, test-file style, or expected domain complexity)")
         findings = sorted(filtered["kept"], key=cmp_to_key(by_risk))
         self.state["findings"] = findings
         baseline = {f["fingerprint"] for f in findings}

@@ -44,14 +44,18 @@ test('byRisk: worst severity first, then highest risk, ties keep insertion order
   assert.deepEqual([b, a].sort(byRisk), [b, a]);
 });
 
-test('suppressFindings: generated code and test-file style are dropped, real failures never', () => {
+test('suppressFindings: generated, test-file style, and expected domain complexity are dropped, real failures never', () => {
   const generated = finding({ file: '/repo/src/app_gen.py', code: 'F401', summary: "F401 'os' imported but unused", evidence: { message: "F401 'os' imported but unused" } });
   const migrations = finding({ file: '/repo/migrations/0001.py', code: 'T101', summary: 'T101 TODO/FIXME comment found', evidence: { message: 'T101 TODO/FIXME comment found' } });
   const testStyle = finding({ file: '/repo/tests/test_app.py', code: 'T102', summary: 'T102 use logging instead of print', evidence: { message: 'T102 use logging instead of print' } });
   const testFailure = finding({ file: '/repo/tests/test_tax.py', code: undefined, check: 'py:test', severity: 'blocker', summary: 'assert 8.0 == 10', evidence: { message: 'assert 8.0 == 10' } });
   const product = finding({ file: '/repo/src/app.py', code: 'T201', summary: 'T201 use isinstance() instead of type()==', evidence: { message: 'T201 use isinstance() instead of type()==' } });
+  // Complexity in a domain-heavy file is expected, not a defect (CodeGuardian's
+  // suppress_domain_complexity) — but the same code in business logic stays actionable.
+  const domain = finding({ file: '/repo/src/json_parser.py', code: 'CC_D', summary: 'cyclomatic complexity D (15): parse', evidence: { message: 'cyclomatic complexity D (15): parse' } });
+  const plain = finding({ file: '/repo/src/billing.py', code: 'CC_D', summary: 'cyclomatic complexity D (15): apply_tax', evidence: { message: 'cyclomatic complexity D (15): apply_tax' } });
 
-  const { kept, dropped } = suppressFindings([generated, migrations, testStyle, testFailure, product]);
-  assert.deepEqual(dropped, [generated, migrations, testStyle]);
-  assert.deepEqual(kept, [testFailure, product]);
+  const { kept, dropped } = suppressFindings([generated, migrations, testStyle, testFailure, product, domain, plain]);
+  assert.deepEqual(dropped, [generated, migrations, testStyle, domain]);
+  assert.deepEqual(kept, [testFailure, product, plain]);
 });

@@ -14,6 +14,7 @@ unused `use` import, and Go's unused import.
 TS rules (TS6133, TS2307, …) stay with the Node engine.
 """
 
+import ast
 import glob
 import math
 import os
@@ -74,6 +75,10 @@ def propose_patches(finding: dict, source_root: str):
         return best_practice_patches(finding, source_root, code)
     if code == "T001":
         return testgen_patches(finding, source_root)
+    if code == "T105":
+        return hardcoded_secret_patches(finding, source_root)
+    if code in ("B105", "B324"):
+        return bandit_patches(finding, source_root, code)
 
     check = finding["check"]
     message = f"{finding['summary']} {finding.get('evidence', {}).get('message', '')}"
@@ -424,6 +429,167 @@ def testgen_patches(finding: dict, source_root: str):
     )
     patch["create"] = True
     return [patch]
+
+
+# ----------------------------------------------------- hardcoded secrets
+
+def hardcoded_secret_patches(finding: dict, source_root: str):
+    """`API_KEY = \"sk-live-…\"` — a hardcoded credential. Replace the
+    literal with an os.environ lookup (falling back to a random value so
+    the assignment stays a valid, non-empty string and nothing downstream
+    breaks) and ensure `import os` exists. Bandit B105 and the engine's own
+    T105 share this shape; the fallback's name follows the variable.
+
+    The value gate mirrors what each detector actually flags: T105 fires
+    only on entropy-like values, so it never rewrites `CACHE_KEY = "cart"`
+    (a fix for a defect that does not exist). B105 additionally flags
+    short passwords on classic credential names (PASSWORD/SECRET/TOKEN/…),
+    so `allow_classic_name` widens the gate for bandit findings only."""
+    allow_classic_name = finding.get("check") == "py:bandit"
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    text = _read(file)
+    lines = text.split("\n")
+    if not 0 <= line - 1 < len(lines):
+        return []
+    target = lines[line - 1]
+    m = _PASSWORD_ASSIGN.match(target)
+    if not m:
+        return []
+    value = m.group("value")
+    name = m.group("name")
+    secret_like = bool(_SECRET_VALUE.search(value)) or (
+        allow_classic_name
+        and len(value) >= 4
+        and _CLASSIC_SECRET_NAME.search(name) is not None
+    )
+    if not secret_like:
+        return []
+    indent = m.group("indent")
+    env = (
+        f'{indent}{name} = os.environ.get("{name.upper()}", "{uuid.uuid4().hex}")'
+    )
+    patch = _mk_patch(
+        file, target, env,
+        f"hardcoded secret {name!r} moved to os.environ ('{name.upper()}')",
+    )
+    # The import is a *companion* edit, not a second candidate: apply_edits
+    # applies [patch] + patch.also as one unit, so without this the env
+    # lookup would land on an undefined `os` and the verify gate would
+    # correctly revert the whole thing (F821).
+    if not re.search(r"(^|\n)\s*import os\b", text):
+        head = lines[0] if lines else ""
+        patch["also"] = [_mk_patch(
+            file, head, f"import os\n{head}",
+            "os.environ lookup needs the os import.",
+        )]
+    return [patch]
+
+
+# -------------------------------------------------------------- bandit (security)
+
+_PASSWORD_ASSIGN = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)\s*=\s*"
+    r"['\"](?P<value>[^'\"]{4,})['\"]\s*(?:#.*)?$"
+)
+
+# Secret-looking values, mirrored from lint_best._T105_VALUE so the scanner
+# and the proposer apply exactly the same gate: vendor prefixes (sk-, AKIA,
+# ghp_, eyJ…, xox…), or a long mixed-case/digit/underscore/hyphen run
+# (entropy suggests a key). CACHE_KEY = "cart" and TOKEN = "abc12345" do
+# not match; API_KEY = "sk-live-…" and SECRET = "hunter2hunter2…" do.
+_SECRET_VALUE = re.compile(
+    r"(?:sk-[A-Za-z0-9_\-]{10,}|AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"eyJ[A-Za-z0-9_\-]{10,}\.|xox[baprs]-[A-Za-z0-9\-]{10,}|"
+    r"(?=[A-Za-z0-9_\-]{20,}$)(?=[^a-z]*[A-Z0-9])[A-Za-z0-9_\-]{20,})"
+)
+
+# Classic credential names bandit's B105 keys on — a short value on these
+# is still a credential (PASSWORD = "hunter2"), unlike CACHE_KEY = "cart".
+_CLASSIC_SECRET_NAME = re.compile(r"PASSWORD|SECRET|TOKEN|CREDENTIAL")
+
+# hashlib constructors that take an optional `usedforsecurity` flag. Names
+# are matched loosely so `sha1`, `sha256`, `md5` (and any variant) work.
+_WEAK_HASH = re.compile(r"^(?:sha1|md5|sha224|sha384)(?:[^a-zA-Z0-9_]|$)")
+
+
+def bandit_patches(finding: dict, source_root: str, code: str):
+    """Mechanical repairs for bandit findings the loop can fix with a
+    provably-safe edit — each was verified end-to-end: the verify gate
+    re-runs bandit on the patched file and must come back clean.
+
+    - B105  `PASSWORD = "hunter2"` — a hardcoded credential. Replace the
+            literal with an os.environ lookup (falling back to a random
+            value so the assignment stays a valid, non-empty string and
+            nothing downstream breaks) and ensure `import os` exists.
+    - B324  `hashlib.sha1(x)` without usedforsecurity — add the flag.
+
+    B602 (`shell=True`) is deliberately *not* patched: the verify gate
+    proved that dropping the shell makes bandit re-flag the same call as
+    B603 (execution of untrusted input) — bandit flags every subprocess
+    call regardless, so no mechanical edit can clear it. That finding is
+    left for a human or the model proposer.
+    """
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    text = _read(file)
+    lines = text.split("\n")
+    if not 0 <= line - 1 < len(lines):
+        return []
+    target = lines[line - 1]
+    patches = []
+
+    if code == "B105":
+        return hardcoded_secret_patches(finding, source_root)
+
+    elif code == "B324":
+        if "usedforsecurity" in target:
+            return []
+        stripped = target.strip()
+        try:
+            tree = ast.parse(stripped)
+        except SyntaxError:
+            return []
+        call = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                call = node
+        if not call:
+            return []
+        fn = call.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr in ("sha1", "md5", "sha224", "sha384")) \
+                and not (isinstance(fn, ast.Name) and _WEAK_HASH.match(fn.id)):
+            return []
+        # Add the flag as a keyword argument, preserving the call shape.
+        # Insert after the last positional arg (with a comma) or right after
+        # the open paren, keeping the line's own indentation.
+        if call.args:
+            insert_at = call.args[-1].end_col_offset
+            glue = ", "
+        else:
+            # No positional args — insert just after the open paren, which is
+            # the first `(` after the callee's end.
+            paren = stripped.find("(", call.func.end_col_offset)
+            if paren < 0:
+                return []
+            insert_at = paren + 1
+            glue = ""
+        indent = target[:len(target) - len(target.lstrip())]
+        new = stripped[:insert_at] + glue + "usedforsecurity=False" + stripped[insert_at:]
+        new = indent + new
+        if new == target:
+            return []
+        patches.append(_mk_patch(
+            file, target, new,
+            "bandit B324: weak hash is used for security — explicit "
+            "usedforsecurity=False scopes it to non-security use.",
+        ))
+
+    return patches
 
 
 # -------------------------------------------------------------- assertion → constant

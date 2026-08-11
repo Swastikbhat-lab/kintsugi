@@ -31,7 +31,7 @@ export interface RiskScore {
 const SECURITY = /^B\d{3}$/;
 const COMPLEXITY = /^CC_[CDEF]$/;
 const PERF = /^P\d{3}$/;
-const FIXABLE = /^(T201|T202|T203|T001)$/;
+const FIXABLE = /^(T201|T202|T203|T001|T105|B105|B324)$/;
 const IMPORT = /^(F401|I001|unused_imports)$/;
 const HARDCODED = /hardcoded (password|secret|key|token)|api[_-]?key|aws[_-]?secret/;
 
@@ -92,6 +92,11 @@ export function byRisk(a: Finding, b: Finding): number {
 const GENERATED = /generated|_gen\.|migrations\/|vendor\//i;
 const STYLE = /^(T\d{3}|P\d{3}|CC_[A-F])$/;
 const TEST_FILE = /(?:^|[/\\])test_[^/\\]*\.py$|(?:^|[/\\])[^/\\]*_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$/;
+// Complexity is expected in domain-heavy files (a parser, a crypto wrapper, a
+// transform pipeline) — a CC finding there is not a defect a repair loop can
+// act on, and it would otherwise squat at the top of the queue forever.
+const DOMAIN_FILE = /parser|model|crypto|transform/i;
+const COMPLEXITY_CODE = /^CC_[A-F]$/;
 
 export function suppressFindings(
   findings: Finding[],
@@ -100,9 +105,11 @@ export function suppressFindings(
   const dropped: Finding[] = [];
   for (const f of findings) {
     const file = f.file ?? '';
+    const code = f.code ?? '';
     const generated = GENERATED.test(file);
-    const testStyle = TEST_FILE.test(file) && STYLE.test(f.code ?? '');
-    if (generated || testStyle) dropped.push(f);
+    const testStyle = TEST_FILE.test(file) && STYLE.test(code);
+    const domainComplexity = COMPLEXITY_CODE.test(code) && DOMAIN_FILE.test(file);
+    if (generated || testStyle || domainComplexity) dropped.push(f);
     else kept.push(f);
   }
   return { kept, dropped };

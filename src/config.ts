@@ -186,16 +186,6 @@ async function pythonChecks(sourceRoot: string, probe: ToolProbe): Promise<Check
       severity: 'major',
     });
   }
-  if (await probe('radon --version')) {
-    checks.push({
-      name: 'py:radon',
-      command: 'radon cc -s --min C .',
-      parser: 'radon',
-      severity: 'minor',
-      parseOnExit0: true,
-    });
-  }
-
   // The engine's own stdlib-only scanners need no third-party tool, just a
   // Python interpreter — so they are always on for Python repos (the
   // script's existence is the only other gate; an engine checkout without
@@ -205,6 +195,19 @@ async function pythonChecks(sourceRoot: string, probe: ToolProbe): Promise<Check
   let anyPy: string | undefined;
   for (const interp of interps) {
     if (await probe(`${interp} -c "import ast"`)) { anyPy = interp; break; }
+  }
+  if (anyPy && await probe('radon --version')) {
+    // radon loads pyproject.toml at import time and crashes on invalid TOML
+    // — the wrapper hides a broken config for the run and restores it, so
+    // the check works on repos with a stray/malformed pyproject.toml
+    // instead of silently reporting nothing.
+    checks.push({
+      name: 'py:radon',
+      command: `${anyPy} "${PY_SCRIPT('radon_wrap.py')}"`,
+      parser: 'radon',
+      severity: 'minor',
+      parseOnExit0: true,
+    });
   }
   if (anyPy && existsSync(PY_SCRIPT('lint_perf.py'))) {
     checks.push({
