@@ -14,9 +14,11 @@ import json
 import os
 import sys
 
+from .audit import audit_trace, create_audit_client, print_audit
 from .config import load_config
 from .loop import Loop
 from .report import exit_code_for, report_json, summarise, summary_lines
+from .tracer import cost_usd
 
 _USAGE = (
     "No checks discovered. Without a kintsugi.config.json the Python engine detects the\n"
@@ -42,6 +44,8 @@ _USAGE = (
     "  --llm-mock <path>    replay canned proposals (keyless demo/tests)\n"
     "  --watch              keep repairing as the repo drifts (Ctrl+C to stop)\n"
     "  --interval <secs>    with --watch: also re-check every N seconds\n"
+    "  --trace <id>         audit a finished run: read its Langfuse trace and\n"
+    "                       print the per-finding cost table (needs LANGFUSE keys)\n"
 )
 
 _ICON = {"observe": "◎", "diagnose": "◆", "repair": "✎", "verify": "⟳", "settle": "■"}
@@ -79,6 +83,17 @@ def main(argv=None):
             pass
     argv = sys.argv[1:] if argv is None else argv
     args = _parse_args(argv)
+
+    # Audit mode: no loop runs, no source needed — read a finished run's
+    # trace from Langfuse and print the per-finding cost table.
+    if args.get("trace"):
+        client = create_audit_client()
+        if client is None:
+            print("kintsugi: auditing needs LANGFUSE_PUBLIC_KEY/SECRET_KEY and the "
+                  "langfuse SDK (pip install langfuse)", file=sys.stderr)
+            return 2
+        print(print_audit(audit_trace(client, args["trace"]), cost_usd))
+        return 0
 
     source_root = os.path.abspath(args.get("source", "."))
     config_path = os.path.abspath(args["config"]) if args.get("config") else None

@@ -1,8 +1,10 @@
 import { resolve } from 'node:path';
 import { watch as fsWatch } from 'node:fs';
+import { auditTrace, createAuditClient, printAudit } from './audit.js';
 import { Loop } from './loop.js';
 import { loadConfig } from './config.js';
 import { summarise, summaryLines, reportJson, exitCodeFor } from './report.js';
+import { costUsd } from './tracer.js';
 import { WatchSession, snapshotTree, changedPaths } from './watch.js';
 import type { RunConfig, LoopEvent, RunState } from './types.js';
 
@@ -26,6 +28,19 @@ for (let i = 2; i < process.argv.length; i++) {
   } else {
     args.set(key, 'true');
   }
+}
+
+// Audit mode: no loop runs, no source needed — read a finished run's trace
+// from Langfuse and print the per-finding cost table.
+if (args.has('trace')) {
+  const client = await createAuditClient();
+  if (!client) {
+    console.error('kintsugi: auditing needs LANGFUSE_PUBLIC_KEY/SECRET_KEY and the ' +
+      '@langfuse/client package (npm install @langfuse/client)');
+    process.exit(2);
+  }
+  console.log(printAudit(await auditTrace(client, args.get('trace')!), costUsd));
+  process.exit(0);
 }
 
 const sourceRoot = resolve(args.get('source') ?? '.');

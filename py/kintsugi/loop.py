@@ -218,6 +218,7 @@ class Loop:
                 self.tracer.generation(
                     "propose",
                     getattr(self.provider, "last_usage", None),
+                    fingerprint=target["fingerprint"],
                     check=target["check"], candidates=len(candidates),
                 )
             except Exception as err:

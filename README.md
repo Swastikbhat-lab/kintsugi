@@ -224,6 +224,14 @@ the ledger records — joinable on fingerprint + outcome. Model calls are
 cost), never fabricated numbers. Without keys, or without the `langfuse`
 SDK, the tracer is an inert no-op and can never take the loop down.
 
+**Audit a finished run from its trace** — `kintsugi --trace <traceId>`
+(`npm run cli -- --trace <traceId>` for the TS engine) queries Langfuse,
+joins each `generation`'s reported usage to the `settle` span's attempt
+history by fingerprint, and prints a per-finding cost table
+(fingerprint, finding, outcome, input/output tokens, cost) plus a total.
+Multiple model calls for one finding accumulate into its row, and the
+same prices used at trace time produce the same costs.
+
 ## The point
 
 Auto-fixers fail one way that matters more than all others: they apply

@@ -6,6 +6,7 @@ from functools import cmp_to_key
 
 import pytest
 
+from kintsugi.audit import audit_trace, print_audit
 from kintsugi.config import default_checks
 from kintsugi.parsers import parse_radon
 from kintsugi.patch import apply_edits
@@ -290,6 +291,82 @@ def test_tracer_settle_span_carries_the_attempt_history():
     )
     assert fake.spans[0]["input"]["attempts"][0]["fingerprint"] == "f1"
     assert fake.spans[0]["input"]["attempts"][0]["outcome"] == "committed"
+
+
+# ------------------------------------------------------------- trace audit
+
+class _FakeObservations:
+    def __init__(self, records):
+        self.records = records
+
+    def get_many(self, **kw):
+        return type("R", (), {"data": self.records})()
+
+
+class _FakeAuditClient:
+    def __init__(self, records):
+        self.api = type("A", (), {"observations": _FakeObservations(records)})()
+
+
+def _trace_records(attempts, generations=()):
+    return [
+        {"name": "settle", "type": "SPAN", "input": {
+            "status": "converged", "iterations": 3, "attempts": attempts}},
+        *generations,
+    ]
+
+
+def test_audit_joins_generation_usage_to_attempts_by_fingerprint():
+    records = _trace_records(
+        attempts=[
+            {"fingerprint": "fpA", "check": "py:bandit", "outcome": "committed",
+             "patch": {"file": "a.py", "rationale": "move secret to env"},
+             "provider": False, "collateral": [], "at": "t"},
+            {"fingerprint": "fpB", "check": "py:test", "outcome": "quarantined",
+             "patch": {"file": "b.py", "rationale": "no rule"},
+             "provider": False, "collateral": [], "at": "t"},
+        ],
+        generations=[
+            {"name": "propose", "type": "GENERATION",
+             "input": {"fingerprint": "fpA", "check": "py:bandit", "candidates": 1},
+             "usage": {"input": 1000, "output": 500}},
+            {"name": "propose", "type": "GENERATION",
+             "input": {"fingerprint": "fpA", "check": "py:bandit", "candidates": 2},
+             "usage": {"input": 200, "output": 100}},
+        ],
+    )
+    result = audit_trace(_FakeAuditClient(records), "t1")
+    assert result["status"] == "ok"
+    # Two model calls for fpA accumulate into one row.
+    assert result["rows"][0]["fingerprint"] == "fpA"
+    assert result["rows"][0]["inputTokens"] == 1200
+    assert result["rows"][0]["outputTokens"] == 600
+    assert result["rows"][0]["outcome"] == "committed"
+    assert result["rows"][1]["inputTokens"] == 0
+    assert result["total"] == {"input": 1200, "output": 600}
+
+
+def test_print_audit_renders_rows_and_total_with_derived_cost():
+    records = _trace_records(
+        attempts=[{"fingerprint": "fpA", "check": "py:bandit", "outcome": "committed",
+                   "patch": {"file": "a.py", "rationale": "move secret to env"},
+                   "provider": False, "collateral": [], "at": "t"}],
+        generations=[{"name": "propose", "type": "GENERATION",
+                      "input": {"fingerprint": "fpA"},
+                      "usage": {"input": 1_000_000, "output": 1_000_000}}],
+    )
+    out = print_audit(audit_trace(_FakeAuditClient(records), "t1"), cost_usd)
+    assert "FINGERPRINT" in out and "fpA" in out and "committed" in out
+    assert "TOTAL" in out
+    assert "30.000000" in out  # 1M in + 1M out at $5/$25 per 1M = $30
+
+
+def test_audit_reports_no_trace_and_tolerates_missing_settle():
+    empty = audit_trace(_FakeAuditClient([]), "missing")
+    assert empty["status"] == "no-trace"
+    no_settle = audit_trace(_FakeAuditClient([{"name": "observe", "type": "SPAN", "input": {}}]), "t")
+    assert no_settle["status"] == "ok" and no_settle["rows"] == []
+    assert "no kintsugi attempt history" in print_audit(no_settle, cost_usd)
 
 
 # ------------------------------------------------------------- discovery

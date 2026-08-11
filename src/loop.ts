@@ -305,7 +305,7 @@ export class Loop {
             this.tracer.generation(
               'propose',
               (this.provider as any)?.lastUsage ?? null,
-              { check: target.check, candidates: candidates.length },
+              { fingerprint: target.fingerprint, check: target.check, candidates: candidates.length },
             );
           } catch (err) {
             emit(`Model proposer failed: ${(err as Error).message}`);

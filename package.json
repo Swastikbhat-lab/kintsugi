@@ -20,7 +20,8 @@
     "demo:reset": "git checkout -- fixture && rm -rf .kintsugi-demo .kintsugi-ci"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.116.0"
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@langfuse/client": "^5.10.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
