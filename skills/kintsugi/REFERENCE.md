@@ -39,6 +39,12 @@ speaks TAP on every platform.
 | `lines` | one `path: message` (or bare `message`) per line | `README.md: version 0.1.0 does not match 0.2.0` |
 | `strict` | `path:line[:col]: message` only — bare lines are never findings | `src/foo.py:12:5: F401 'os' imported but unused` |
 
+`strict` is defensive beyond the shape: paths under `node_modules`, `dist`,
+`build`, `.git`, virtualenvs (`.venv`/`venv`/`site-packages`) and Python
+caches are never findings, and pytest `warnings summary` lines
+(`path:line: XxxWarning: …`) are ignored — a noisy suite must not surface
+phantom defects.
+
 A check that exits non-zero with no parseable finding is a **crash** — the
 loop reports it and never heals it. One exception is built in: if the
 declared parser yields nothing but the output is clearly spec-shaped

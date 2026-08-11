@@ -11,7 +11,13 @@ import { fingerprint } from './fingerprint.js';
  * is how an auto-fixer starts breaking things.
  */
 
-const SKIP = /(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/;
+// Tool noise that must never be treated as repo code: vendored deps,
+// build output, VCS internals, virtualenvs and their package dirs, and the
+// caches Python toolchains drop inside the repo. A real repo can name a
+// directory `venv`, but for a repair tool the cost of skipping beats the
+// cost of healing site-packages.
+const SKIP =
+  /(^|[\\/])(node_modules|dist|build|\.git|\.venv|venv|site-packages|dist-packages|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox)([\\/]|$)/;
 
 /**
  * Normalize a reported path against the source root; drop anything outside.
@@ -319,6 +325,11 @@ export function parseStrict(output: string, cwd: string, check: string): Finding
     // A traceback frame (`test_x.py:7: in test_tax_rate`) is scaffolding;
     // the error line that follows it carries the defect.
     if (/^in [\w.]+$/.test(message)) continue;
+    // pytest's `warnings summary` block lists `path:line: CategoryWarning:
+    // message` lines in the same shape as findings — but they are not the
+    // failure the check is reporting (pytest exits non-zero only on real
+    // failures), so a noisy suite must not surface them as phantom defects.
+    if (/^[A-Za-z][\w.]*Warning:\s/.test(message)) continue;
     // Tool codes travel inside the message for some tools (ruff: `F401 [*]
     // 'os' imported but unused`) — lift the leading code token out so rules
     // can dispatch on it the way they do on TSxxxx.

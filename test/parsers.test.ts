@@ -221,6 +221,40 @@ test('strict parser drops outside-root paths and non-file noise', () => {
   assert.equal(parseStrict(out, CWD, 'go:test').length, 0);
 });
 
+test('strict parser drops venv and site-packages findings even inside the root', () => {
+  // A real run surfaced phantoms from `.venv/Lib/site-packages/…`: the
+  // path passes the outside-root check (it IS under the root) but is not
+  // repo code. Venv dirs and package dirs must be skipped anywhere.
+  const root = resolve(CWD).replace(/\\/g, '/');
+  const out = [
+    `${root}/.venv/Lib/site-packages/jwt/api_jwt.py:147: InsecureKeyLengthWarning: Key is too short`,
+    `${root}/.venv/Lib/site-packages/jwt/api_jwt.py:365: InsecureKeyLengthWarning: Key is too short`,
+    `${root}/venv/lib/python3.12/site-packages/x/y.py:9: boom`,
+    `${root}/src/foo.py:12:5: F401 'os' imported but unused`,
+  ].join('\n');
+  const f = parseStrict(out, root, 'py:lint');
+
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/src/foo.py');
+});
+
+test('strict parser ignores pytest warnings summary lines', () => {
+  // The `warnings summary` block shares the `path:line: Type: message`
+  // shape with real findings, but warnings are not the failure the check
+  // reports — a noisy suite must not surface them as phantom defects.
+  const out = [
+    'src/tax.py:7: assert 8 == 10',
+    '==== warnings summary ====',
+    'src/api.py:12: DeprecationWarning: old API used',
+    'src/api.py:13: pytest.PytestUnhandledCoroutineWarning: coroutine not awaited',
+    'src/api.py:14: UserWarning: unknown',
+  ].join('\n');
+  const f = parseStrict(out, CWD, 'py:test');
+
+  assert.equal(f.length, 1);
+  assert.equal(f[0].summary, 'assert 8 == 10');
+});
+
 test('strict parser reads a drive-letter path anchored inside the root', () => {
   // The drive-letter spelling is a Windows shape; on POSIX the same content
   // is plain `/repo/…`. Deriving both from resolve(CWD) keeps the assertion
