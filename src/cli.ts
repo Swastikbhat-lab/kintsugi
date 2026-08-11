@@ -1,8 +1,10 @@
 import { resolve } from 'node:path';
+import { watch as fsWatch } from 'node:fs';
 import { Loop } from './loop.js';
 import { loadConfig } from './config.js';
 import { summarise, summaryLines, reportJson, exitCodeFor } from './report.js';
-import type { RunConfig, LoopEvent } from './types.js';
+import { WatchSession, snapshotTree, changedPaths } from './watch.js';
+import type { RunConfig, LoopEvent, RunState } from './types.js';
 
 /**
  * Headless entry point, for CI and for driving a run without a dashboard.
@@ -67,7 +69,9 @@ if (checks.length === 0) {
     '                       a clean tree so its edits stay yours to review\n' +
     '  --branch <name>      branch to use with --git (default kintsugi/fixes)\n' +
     '  --json               machine-readable final report on stdout\n' +
-    '  --list-checks        print the checks that would run, then exit',
+    '  --list-checks        print the checks that would run, then exit\n' +
+    '  --watch              keep repairing as the repo drifts (Ctrl+C to stop)\n' +
+    '  --interval <secs>    with --watch: also re-check every N seconds',
   );
   process.exit(2);
 }
@@ -93,15 +97,78 @@ const ICON = {
 const say = (e: LoopEvent) =>
   console.log(`  ${ICON[e.phase]} [${e.iteration}] ${e.phase.padEnd(8)} ${e.message}`);
 
-const loop = new Loop(config, say);
-const state = await loop.run();
-
-const summary = summarise(state, loop.actionableRemaining());
-
-if (args.has('json')) {
-  console.log(JSON.stringify(reportJson(summary, sourceRoot), null, 2));
-} else {
-  console.log(`\n  ${summaryLines(summary, sourceRoot).join('\n  ')}\n`);
+/** One pass of the loop plus its report. Returns the exit code and the state. */
+async function runOnce(): Promise<{ code: number; state: RunState }> {
+  const loop = new Loop(config, say);
+  const state = await loop.run();
+  const summary = summarise(state, loop.actionableRemaining());
+  if (args.has('json')) {
+    console.log(JSON.stringify(reportJson(summary, sourceRoot), null, 2));
+  } else {
+    console.log(`\n  ${summaryLines(summary, sourceRoot).join('\n  ')}\n`);
+  }
+  return { code: exitCodeFor(summary, config.quarantinedOk ?? false), state };
 }
 
-process.exit(exitCodeFor(summary, config.quarantinedOk ?? false));
+if (!args.has('watch')) {
+  process.exit((await runOnce()).code);
+}
+
+// ---- watch mode: keep the repo repaired as it drifts ---------------------
+const debounceMs = 2000;
+const intervalSecs = Number(args.get('interval') ?? 0);
+const intervalMs = Number.isFinite(intervalSecs) && intervalSecs > 0 ? intervalSecs * 1000 : 0;
+
+const session = new WatchSession({
+  debounceMs,
+  intervalMs,
+  onRun: async () => {
+    const { state } = await runOnce();
+    // The files this pass wrote are the loop's own echo — the session drops
+    // their events so a repair never re-triggers itself.
+    return state.attempts.map((a) => a.patch.file);
+  },
+  log: (msg) => console.log(`  ⌁ ${msg}`),
+});
+
+console.log(`  Watching ${sourceRoot} — Ctrl+C to stop. A change is checked ${debounceMs / 1000}s after it settles.`);
+
+let polling = false;
+const stop = () => {
+  session.close();
+  process.exit(0);
+};
+process.on('SIGINT', stop);
+process.on('SIGTERM', stop);
+
+const startPolling = () => {
+  if (polling) return;
+  polling = true;
+  let prev = snapshotTree(sourceRoot);
+  const cadence = Math.max(intervalMs || 5000, debounceMs);
+  console.error('  recursive file watching unavailable — polling for changes instead');
+  setInterval(() => {
+    const next = snapshotTree(sourceRoot);
+    const changed = changedPaths(prev, next);
+    if (changed.length) {
+      prev = next;
+      for (const p of changed) session.onChange(p);
+    }
+  }, cadence);
+};
+
+try {
+  const watcher = fsWatch(sourceRoot, { recursive: true }, (event, filename) => {
+    session.onChange(filename?.toString() ?? null);
+  });
+  watcher.on('error', (err) => {
+    console.error(`  file watcher failed: ${err.message}`);
+    try { watcher.close(); } catch { /* already closed */ }
+    startPolling();
+  });
+} catch (err) {
+  console.error(`  file watcher failed: ${(err as Error).message}`);
+  startPolling();
+}
+
+session.start();

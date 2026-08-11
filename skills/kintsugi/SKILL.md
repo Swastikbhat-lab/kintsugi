@@ -23,9 +23,15 @@ The engine ships in this repo and boots itself. From **any** repo, with this
 skill installed:
 
 ```bash
-~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --dry   # survey, write nothing
-~/.claude/skills/kintsugi/scripts/run-loop.sh --source .         # repair
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --dry    # survey, write nothing
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source .          # repair
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --watch  # keep repairing as it drifts
 ```
+
+`--watch` keeps the loop resident: it watches the repo and runs a pass a
+couple of seconds after each change settles, ignoring its own writes so a
+repair never re-triggers itself. `--interval <secs>` adds a periodic
+re-check for drift that doesn't touch files.
 
 The script locates (or bootstraps) the engine at `~/.kintsugi/engine` and
 resolves relative paths against the repo you run it from. In the engine repo
