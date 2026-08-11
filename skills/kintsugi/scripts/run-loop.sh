@@ -48,6 +48,10 @@ find_engine() {
   echo "$eng"
 }
 
+# Absolute on POSIX and on Windows drive letters — a `C:/…` path must not
+# be mistaken for a relative one (Git Bash would join it under INVOKE_DIR).
+is_abs() { [[ "$1" == /* || "$1" =~ ^[A-Za-z]:[/\\] ]]; }
+
 # Resolve --source early so the runner can be chosen from the target repo.
 resolve_source() {
   local prev="" src=""
@@ -57,7 +61,7 @@ resolve_source() {
   done
   if [[ -z "$src" ]]; then
     echo "$INVOKE_DIR"
-  elif [[ "$src" == /* ]]; then
+  elif is_abs "$src"; then
     echo "$src"
   else
     echo "$(cd "$INVOKE_DIR" && pwd)/$src"
@@ -97,10 +101,11 @@ prev=""
 for a in "$@"; do
   case "$prev" in
     --source|--config|--state|--llm-mock)
-      case "$a" in
-        /*) args+=("$a") ;;
-        *)  args+=("$(cd "$INVOKE_DIR" && pwd)/$a") ;;
-      esac
+      if is_abs "$a"; then
+        args+=("$a")
+      else
+        args+=("$(cd "$INVOKE_DIR" && pwd)/$a")
+      fi
       ;;
     *) args+=("$a") ;;
   esac
@@ -112,7 +117,18 @@ if [[ "$RUNNER" == "python" ]]; then
   [[ -d "$ENG/py" ]] || { echo "kintsugi: engine has no Python runner — re-sync the engine" >&2; exit 1; }
   PY="${PYTHON:-}"
   if [[ -z "$PY" ]]; then
-    PY="$(command -v python3 || command -v python)"
+    # A real interpreter, not the Windows Store stub: `command -v python`
+    # succeeds for the alias that prints "Python was not found" and exits
+    # non-zero, so probe each candidate before trusting it.
+    for cand in "$(command -v python3 2>/dev/null)" "$(command -v python 2>/dev/null)" "$(command -v py 2>/dev/null)"; do
+      if [[ -n "$cand" ]] && "$cand" -c 'import sys' >/dev/null 2>&1; then
+        PY="$cand"; break
+      fi
+    done
+  fi
+  if [[ -z "$PY" ]]; then
+    echo "kintsugi: no usable Python interpreter found for the Python engine" >&2
+    exit 1
   fi
   echo "kintsugi: Python engine — no Node runtime needed" >&2
   (cd "$ENG/py" && exec "$PY" -m kintsugi "${args[@]}")
