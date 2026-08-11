@@ -116,10 +116,13 @@ that crashes with no output is a broken harness — reported, never healed.
 
 | Defect | Repair | How |
 |---|---|---|
-| Unused declarations | remove the dead line | rule |
-| Unresolvable import paths | point at the real module | rule |
-| Missing `export` keyword | add it (when the declaration exists) | rule |
-| Stale version strings | replace from package.json | rule |
+| Unused declarations (TS) | remove the dead line | rule |
+| Unresolvable import paths (TS) | point at the real module | rule |
+| Missing `export` keyword (TS) | add it (when the declaration exists) | rule |
+| Stale version strings (npm) | replace from package.json | rule |
+| Unused imports (Python `F401`, Go) | remove the import line | rule |
+| Unsorted import blocks (Python `I001`) | sort them isort-style | rule |
+| Wrong constant behind a failing assertion (Python/Go) | recompute from the assertion's own numbers | rule |
 | Wrong behaviour behind a failing test | rewrite the code | model, then **verified** |
 | Missing functions, missing features | — | quarantined with evidence |
 

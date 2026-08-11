@@ -13,7 +13,7 @@
   "scripts": {
     "cli": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/parsers.test.ts test/ledger.test.ts test/imports.test.ts test/propose.test.ts test/loop.test.ts",
+    "test": "tsx --test test/*.test.ts",
     "demo": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-demo/state.json --quarantined-ok",
     "demo:dry": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --dry",
     "demo:ci": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-ci/state.json --quarantined-ok",

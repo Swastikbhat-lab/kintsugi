@@ -22,8 +22,16 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     case 'TS2459': return missingExportPatches(finding, sourceRoot);
     case 'TS2834':
     case 'TS2835': return missingExtensionPatches(finding, sourceRoot);
+    case 'F401': return unusedPythonImportPatches(finding, sourceRoot);
+    case 'I001': return unsortedImportBlockPatches(finding, sourceRoot);
   }
   if (finding.check === 'version') return versionDriftPatches(finding, sourceRoot);
+  const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
+  if (finding.check === 'py:test') return assertionConstantPatches(finding, sourceRoot, 'python');
+  if (finding.check === 'go:test' || finding.check === 'go:vet') {
+    if (/imported and not used/.test(message)) return unusedGoImportPatches(finding, sourceRoot);
+    return assertionConstantPatches(finding, sourceRoot, 'go');
+  }
   return [];
 }
 
@@ -173,6 +181,294 @@ function versionDriftPatches(finding: Finding, sourceRoot: string): Patch[] {
     line.replace(stale, expected),
     `Version ${stale} is stale; package.json declares ${expected}.`,
   )];
+}
+
+// -------------------------------------------------------------- python F401
+
+/**
+ * Unused import (`F401 'os' imported but unused`). The mechanical fix is to
+ * drop the import. Whole-line imports (the overwhelmingly common shape) are
+ * removed outright, with a surrounding blank line collapsed so the file does
+ * not gain a double blank. Multi-name imports (`import a, b`) have the one
+ * unused name removed from the list; anything parenthesized or ambiguous is
+ * left for a human — a rule that guesses is worse than no rule.
+ */
+function unusedPythonImportPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  // ruff 0.16+ quotes the unused name with backticks (`os`), older versions
+  // with single quotes — accept either.
+  const name = (finding.evidence.message as string)?.match(/[`'"]([^`'"]+)[`'"]/)?.[1];
+  if (!name) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length || !/\bimport\b/.test(line)) return [];
+
+  // Whole-line import of exactly this name (optionally aliased) — drop it.
+  const whole = new RegExp(
+    `^\\s*(?:import\\s+${escapeRegExp(name)}(?:\\s+as\\s+\\w+)?|from\\s+\\S+\\s+import\\s+${escapeRegExp(name)})\\s*(?:#.*)?$`,
+  );
+  if (whole.test(line)) {
+    return removeLinePatch(finding.file, text, idx, `'${name}' is imported but never used — removing the import.`);
+  }
+
+  // `import a, b` / `from x import a, b` — drop the unused name from the list.
+  const list = line.match(/^\s*(?:import|from\s+\S+\s+import)\s+(.+?)\s*(?:#.*)?$/);
+  if (!list || list[1].includes('(')) return [];
+  const items = list[1].split(',').map((s) => s.trim()).filter(Boolean);
+  const kept = items.filter((it) => it.split(/\s+as\s+/)[0].trim() !== name);
+  if (kept.length === items.length) return [];
+  const find = line;
+  const replace = line.replace(list[1], kept.join(', '));
+  return uniqueOrEmpty(finding.file, text, find, replace, `'${name}' is imported but never used — removing it from the import.`);
+}
+
+/**
+ * Remove one line by its exact text, collapsing a preceding blank line so
+ * the file does not gain a double blank. The anchor includes the line's own
+ * newline (or the one before it) so it matches exactly once; a non-unique
+ * anchor is refused rather than guessed at.
+ */
+function removeLinePatch(file: string, text: string, idx: number, rationale: string): Patch[] {
+  const lines = text.split('\n');
+  const line = lines[idx];
+  if (line === undefined || line.trim() === '') return [];
+  const last = idx === lines.length - 1;
+  const find = (idx === 0 ? '' : '\n') + line + (last ? '' : '\n');
+  const replace = idx === 0 ? '' : '\n';
+  return uniqueOrEmpty(file, text, find, replace, rationale);
+}
+
+/** A patch whose anchor is exactly one occurrence — nothing else is safe. */
+function uniqueOrEmpty(file: string, text: string, find: string, replace: string, rationale: string): Patch[] {
+  let count = 0;
+  for (let i = 0; (i = text.indexOf(find, i)) !== -1; i += find.length) count++;
+  if (count !== 1) return [];
+  return [mkPatch(file, find, replace, rationale)];
+}
+
+// -------------------------------------------------------------- python I001
+
+/**
+ * Unsorted import block (`I001 Import block is un-sorted or un-formatted`).
+ * The fix is to order the block as isort does: stdlib first, then
+ * third-party, then first-party, alphabetical within each section, `import
+ * x` before `from x import`. Only plain consecutive import lines are sorted;
+ * a block with comments or parenthesized imports is left for a human. The
+ * verify gate re-runs the linter, so a sort that disagrees with the tool's
+ * preference is reverted, not shipped.
+ */
+function unsortedImportBlockPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const startIdx = finding.line - 1;
+  if (startIdx < 0 || startIdx >= lines.length) return [];
+  if (!isImportLine(lines[startIdx])) return [];
+
+  // Walk to the block boundaries: consecutive plain import lines. A comment
+  // or parenthesized import ends the walk — sorting around those is guesswork.
+  let from = startIdx;
+  while (from > 0 && isImportLine(lines[from - 1]) && !lines[from - 1].includes('#')) from--;
+  let to = startIdx;
+  while (to < lines.length - 1 && isImportLine(lines[to + 1]) && !lines[to + 1].includes('#')) to++;
+  const block = lines.slice(from, to + 1);
+  if (block.length < 2) return [];
+  if (block.some((l) => l.includes('(') || l.includes(')'))) return [];
+
+  const dir = dirname(finding.file);
+  const sorted = [...block].sort((a, b) => compareImports(a, b, dir, sourceRoot));
+  if (sorted.join('\n') === block.join('\n')) return [];
+
+  const find = block.join('\n');
+  const replace = sorted.join('\n');
+  return uniqueOrEmpty(
+    finding.file, text, find, replace,
+    'Import block is out of order — sorting it (stdlib, third-party, first-party).',
+  );
+}
+
+function isImportLine(line: string): boolean {
+  const t = line.trim();
+  return /^(?:import\s+|from\s+\S+\s+import\s+)/.test(t);
+}
+
+const STDLIB = new Set([
+  'abc', 'argparse', 'array', 'asyncio', 'base64', 'bisect', 'calendar', 'collections',
+  'concurrent', 'configparser', 'contextlib', 'copy', 'csv', 'dataclasses', 'datetime',
+  'decimal', 'difflib', 'enum', 'errno', 'fractions', 'functools', 'getpass', 'glob',
+  'gzip', 'hashlib', 'heapq', 'html', 'http', 'importlib', 'inspect', 'io', 'itertools',
+  'json', 'locale', 'logging', 'math', 'multiprocessing', 'os', 'pathlib', 'pickle',
+  'platform', 'queue', 'random', 're', 'shutil', 'signal', 'socket', 'sqlite3', 'ssl',
+  'statistics', 'string', 'struct', 'subprocess', 'sys', 'tempfile', 'threading', 'time',
+  'traceback', 'types', 'typing', 'unittest', 'urllib', 'uuid', 'warnings', 'weakref',
+  'xml', 'zipfile', 'zoneinfo',
+]);
+
+function importSection(statement: string, dir: string, sourceRoot: string): number {
+  const t = statement.trim();
+  const m = t.match(/^(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))/);
+  const spec = (m?.[1] ?? m?.[2] ?? '').trim();
+  if (spec.startsWith('.')) return 2; // relative import → the repo's own code
+  const top = spec.split('.')[0];
+  if (STDLIB.has(top)) return 0;
+  // First-party: a package or module of the same name under the source root.
+  if (existsSync(resolve(sourceRoot, top)) || existsSync(resolve(sourceRoot, `${top}.py`))) return 2;
+  return 1;
+}
+
+function compareImports(a: string, b: string, dir: string, sourceRoot: string): number {
+  const sa = importSection(a, dir, sourceRoot);
+  const sb = importSection(b, dir, sourceRoot);
+  if (sa !== sb) return sa - sb;
+  const key = (s: string) => {
+    const t = s.trim();
+    const m = t.match(/^(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))/);
+    const mod = (m?.[1] ?? m?.[2] ?? '').toLowerCase();
+    const kind = t.startsWith('import ') ? 0 : 1;
+    return `${mod}\u0000${kind}\u0000${t.toLowerCase()}`;
+  };
+  return key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+}
+
+// -------------------------------------------------------------- unused import (go)
+
+/**
+ * `imported and not used: "fmt"` (a Go compile error reported by go test /
+ * go build). The fix is to remove the import spec — a whole-line `import
+ * "fmt"` or a `"fmt"` line inside an import block. Exactly like the
+ * Python rule, the anchor must be unique or nothing is proposed.
+ */
+function unusedGoImportPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file) return [];
+  const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
+  const path = message.match(/imported and not used:\s*"?([\w./\-]+)"?/)?.[1];
+  if (!path) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const re = new RegExp(`^\\s*"${escapeRegExp(path)}"(\\s|//|$)`);
+  const idx = lines.findIndex((l) => re.test(l) || new RegExp(`^import\\s+"${escapeRegExp(path)}"\\s*$`).test(l.trim()));
+  if (idx === -1) return [];
+  return removeLinePatch(finding.file, text, idx, `'${path}' is imported but not used — removing the import.`);
+}
+
+// -------------------------------------------------------------- assertion → constant
+
+/**
+ * A failing assertion that reveals the right constant. pytest prints
+ * `assert 8.0 == 10`; go test prints `expected 10, got 5`. Neither names the
+ * code — but the test file line the check points at does: read it, find the
+ * call and the expected value, locate the function, and if its body computes
+ * `param * <literal>`, recompute the literal from the assertion's own
+ * numbers. Only a clean decimal result is patched; anything else is left to
+ * the model (or a human), because a rule that guesses is worse than none.
+ */
+function assertionConstantPatches(
+  finding: Finding,
+  sourceRoot: string,
+  lang: 'python' | 'go',
+): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const lines = readFileSync(finding.file, 'utf8').split(/\r?\n/);
+  const testLine = lines[finding.line - 1] ?? '';
+  const parsed = parseAssertion(testLine, lang);
+  if (!parsed) return [];
+
+  const impl = findFunctionBody(parsed.fn, sourceRoot, lang);
+  if (!impl) return [];
+  const re = new RegExp(`\\b${escapeRegExp(impl.param)}\\s*\\*\\s*(\\d+(?:\\\.\\d+)?)\\b`);
+  const m = impl.body.match(re);
+  if (!m) return [];
+
+  const arg = Number(parsed.arg);
+  const expected = Number(parsed.expected);
+  if (!Number.isFinite(arg) || !Number.isFinite(expected) || arg === 0) return [];
+  const value = expected / arg;
+  const literal = String(value);
+  // A clean decimal only — `10/100 → 0.1`, but `10/3 → 3.3333333333333335`
+  // is float noise, not a constant.
+  if (!/^\d+\.?\d*$/.test(literal) || literal.length > 10) return [];
+  if (literal === m[1]) return [];
+
+  const find = m[0];
+  const replace = m[0].replace(/\d+(?:\.\d+)?$/, literal);
+  return uniqueOrEmpty(
+    impl.file, impl.text, find, replace,
+    `The test asserts ${parsed.fn}(${parsed.arg}) == ${parsed.expected}; the constant '${impl.param} * ${m[1]}' makes it ${parsed.fn}(${parsed.arg}) == ${Number(m[1]) * arg} — setting it to ${literal}.`,
+  );
+}
+
+/** Parse the failing assertion's own source line into { fn, arg, expected }. */
+function parseAssertion(line: string, lang: 'python' | 'go'): { fn: string; arg: string; expected: string } | null {
+  if (lang === 'python') {
+    // `assert f(n) == want` and the mirror `assert want == f(n)`.
+    const call = line.match(/assert\s+(\w+)\s*\(\s*([\d.]+)\s*\)\s*==\s*([\d.]+)/);
+    if (call) return { fn: call[1], arg: call[2], expected: call[3] };
+    const mirror = line.match(/assert\s+([\d.]+)\s*==\s*(\w+)\s*\(\s*([\d.]+)\s*\)/);
+    if (mirror) return { fn: mirror[2], arg: mirror[3], expected: mirror[1] };
+    return null;
+  }
+  // Go: testify Equal(t, want, got) and the plain `if got := f(n); got != want`.
+  const eq = line.match(/\.Equal\(\s*t,\s*([\d.]+),\s*(\w+)\s*\(\s*([\d.]+)\s*\)/);
+  if (eq) return { fn: eq[2], arg: eq[3], expected: eq[1] };
+  const got = line.match(/if\s+\w+\s*:=\s*(\w+)\s*\(\s*([\d.]+)\s*\)\s*;\s*\w+\s*!=\s*([\d.]+)/);
+  if (got) return { fn: got[1], arg: got[2], expected: got[3] };
+  return null;
+}
+
+/** The function's source file, body, and first parameter name. */
+function findFunctionBody(
+  fn: string,
+  sourceRoot: string,
+  lang: 'python' | 'go',
+): { file: string; text: string; body: string; param: string } | null {
+  const ext = lang === 'python' ? 'py' : 'go';
+  const sigRe = lang === 'python'
+    ? new RegExp(`def\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`)
+    : new RegExp(`func\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`);
+  const paramRe = lang === 'python'
+    ? /^\s*([A-Za-z_]\w*)\s*(?::[^,)]+)?(?:,|$)/
+    : /^\s*([A-Za-z_]\w*)\s+[^,)]+(?:,|$)/;
+  for (const f of globSync(`**/*.${ext}`, { cwd: sourceRoot })) {
+    const rel = f.replace(/\\/g, '/');
+    if (/(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/.test(rel)) continue;
+    // The defect is in product code, not in the test that caught it.
+    if (lang === 'python' && /(?:^|[/\\])(?:test_|_test)\.py$/.test(rel)) continue;
+    if (lang === 'go' && /\._test\.go$/.test(rel)) continue;
+    const file = resolve(sourceRoot, f);
+    const text = readFileSync(file, 'utf8');
+    const sig = text.match(sigRe);
+    if (!sig) continue;
+    const params = sig[1].match(paramRe);
+    if (!params) continue;
+    const body = extractBody(text, sig.index ?? 0, lang);
+    if (!body) continue;
+    return { file, text, body, param: params[1] };
+  }
+  return null;
+}
+
+/** The function body starting at `sigIndex`: to the next sibling, or EOF. */
+function extractBody(text: string, sigIndex: number, lang: 'python' | 'go'): string | null {
+  const from = text.indexOf('\n', sigIndex);
+  if (from === -1) return null;
+  if (lang === 'go') {
+    const end = text.indexOf('\n\nfunc ', from + 1);
+    const until = end === -1 ? text.length : end + 1;
+    return text.slice(from + 1, until);
+  }
+  // Python: the body is indented deeper than the `def` line; it ends at the
+  // first non-blank line at the def's indent or shallower.
+  const defLine = text.slice(text.lastIndexOf('\n', sigIndex) + 1, from);
+  const indent = defLine.match(/^[ \t]*/)?.[0].length ?? 0;
+  const bodyLines = text.slice(from + 1).split('\n');
+  const body: string[] = [];
+  for (const l of bodyLines) {
+    if (body.length && l.trim() !== '' && (l.match(/^[ \t]*/)?.[0].length ?? 0) <= indent) break;
+    body.push(l);
+  }
+  return body.join('\n');
 }
 
 // -------------------------------------------------------------- helpers

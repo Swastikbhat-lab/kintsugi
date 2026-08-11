@@ -319,14 +319,19 @@ export function parseStrict(output: string, cwd: string, check: string): Finding
     // A traceback frame (`test_x.py:7: in test_tax_rate`) is scaffolding;
     // the error line that follows it carries the defect.
     if (/^in [\w.]+$/.test(message)) continue;
+    // Tool codes travel inside the message for some tools (ruff: `F401 [*]
+    // 'os' imported but unused`) — lift the leading code token out so rules
+    // can dispatch on it the way they do on TSxxxx.
+    const code = message.match(/^([A-Z]+\d+)\b/)?.[1];
     findings.push({
-      fingerprint: fingerprint(check, file, '', message),
+      fingerprint: fingerprint(check, file, code ?? '', message),
       check,
       severity: 'minor',
       summary: message,
       file,
       line,
-      evidence: { message, ...(col !== undefined ? { col } : {}) },
+      code,
+      evidence: { message, ...(col !== undefined ? { col } : {}), ...(code ? { code } : {}) },
     });
   }
   return findings;

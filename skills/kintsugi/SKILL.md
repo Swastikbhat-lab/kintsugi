@@ -66,10 +66,12 @@ own scripts offer — no config file needed for the common cases:
 
 Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing. `--list-checks` prints what would
-run. The repair rules are TypeScript-shaped today; findings from other
-languages are surfaced as typed, file-anchored observations and quarantined
-with evidence when no rule reaches (or repaired by a model, if one is
-configured).
+run. The mechanical repair rules cover TypeScript (dead declarations,
+imports, exports, extensions), Python (unused imports `F401`, unsorted
+import blocks `I001`, wrong constants behind failing assertions), and Go
+(unused imports, wrong constants behind failing assertions). Everything else
+is surfaced as a typed, file-anchored finding and quarantined with evidence
+— or repaired by a model, if one is configured.
 
 ## Invariants (do not break these)
 

@@ -16,6 +16,8 @@ jobs:
         run: npm install
       - name: Install fixture toolchain
         run: cd fixture && npm install
+      - name: Install Python toolchain (for the Python loop test)
+        run: pip install pytest ruff
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
