@@ -1,39 +1,29 @@
 {
   "name": "kintsugi",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "description": "A self-healing repair loop for codebases: observes failing checks (tests, typecheck, lint, custom), repairs the ones with a provable fix, verifies every repair by re-running the checks, and quarantines the rest with evidence. Packaged as a Claude skill.",
   "type": "module",
-  "description": "Self-healing UI: model the interface as a graph, repair it in verified loops.",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },
+  "bin": {
+    "kintsugi": "./dist/cli.js"
+  },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
-    "build:web": "vite build web",
-    "dev:web": "vite web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/parsers.test.ts test/ledger.test.ts test/imports.test.ts test/propose.test.ts test/loop.test.ts",
+    "demo": "tsx src/cli.ts --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-demo/state.json --quarantined-ok",
+    "demo:dry": "tsx src/cli.ts --config fixture/kintsugi.config.json --dry",
+    "demo:ci": "tsx src/cli.ts --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-ci/state.json --quarantined-ok"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.116.0",
-    "axe-core": "^4.13.0",
-    "playwright": "^1.49.0"
+    "@anthropic-ai/sdk": "^0.116.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vite": "^6.0.0",
-    "wait-on": "^9.1.0"
-  },
-  "allowScripts": {
-    "esbuild@0.28.2": true,
-    "esbuild@0.25.12": true
+    "typescript": "^5.7.0"
   }
 }

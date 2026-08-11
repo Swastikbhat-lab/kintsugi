@@ -1,0 +1,19 @@
+[
+  {
+    "match": { "check": "test", "contains": "applyTax" },
+    "candidates": [
+      {
+        "file": "src/pricing.ts",
+        "find": "return amount * 0.08;",
+        "replace": "return amount * 0.05;",
+        "rationale": "Try a 5% tax rate (deliberately wrong — the verify gate must reject this and the ledger must remember)."
+      },
+      {
+        "file": "src/pricing.ts",
+        "find": "return amount * 0.08;",
+        "replace": "return amount * 0.10;",
+        "rationale": "The fixture test asserts 10% on $100, so the rate is 0.10."
+      }
+    ]
+  }
+]

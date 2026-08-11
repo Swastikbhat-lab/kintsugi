@@ -1,0 +1,11 @@
+{
+  "checks": [
+    { "name": "typecheck", "command": "npm run typecheck", "parser": "tsc", "severity": "major" },
+    { "name": "lint", "command": "npm run lint", "parser": "tsc", "severity": "minor" },
+    { "name": "test", "command": "npm test", "parser": "tap", "severity": "blocker" },
+    { "name": "version", "command": "npm run check:version", "parser": "lines", "severity": "minor" }
+  ],
+  "budget": 2,
+  "maxIterations": 12,
+  "allowShared": false
+}

@@ -1,20 +1,17 @@
 import { resolve } from 'node:path';
 import { Loop } from './loop.js';
-import { watch, formatCycle } from './watch.js';
+import { loadConfig } from './config.js';
+import { summarise, summaryLines, reportJson, exitCodeFor } from './report.js';
 import type { RunConfig, LoopEvent } from './types.js';
 
 /**
- * Headless entry point, for CI and for driving a run without the dashboard.
+ * Headless entry point, for CI and for driving a run without a dashboard.
  *
- *   npm run cli -- --target http://localhost:5173 --source ./app --routes /,/settings
+ *   npm run cli -- --source ./fixture --dry
+ *   npm run cli -- --source ./fixture --llm-mock fixture/proposals/tax-rate.json
  */
 
-/**
- * Flags may or may not take a value. Advancing two at a time assumes they
- * always do, which makes a bare `--dry` silently swallow the flag after it —
- * so `--dry --allow-tokens` parsed as `dry="--allow-tokens"` and the second
- * flag simply vanished.
- */
+/** Flags may or may not take a value. */
 const args = new Map<string, string>();
 for (let i = 2; i < process.argv.length; i++) {
   const token = process.argv[i];
@@ -29,47 +26,59 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-const target = args.get('target');
-const source = args.get('source');
+const sourceRoot = resolve(args.get('source') ?? '.');
+const loaded = loadConfig(sourceRoot, args.get('config'));
 
-if (!target || !source) {
+let checks = loaded.checks;
+if (args.has('checks')) {
+  const names = args.get('checks')!.split(',').map((s) => s.trim()).filter(Boolean);
+  checks = checks.filter((c) => names.includes(c.name));
+}
+
+if (args.has('list-checks')) {
+  for (const c of checks) {
+    console.log(`${c.name}\t${c.command}\t(${c.parser})`);
+  }
+  process.exit(0);
+}
+
+if (checks.length === 0) {
   console.error(
-    'Usage: npm run cli -- --target <url> --source <repo> [options]\n' +
+    'No checks configured. Write a kintsugi.config.json in the target repo, or\n' +
+    'pass --checks <a,b,c>.\n\n' +
+    'Usage: npm run cli -- --source <repo> [options]\n' +
     '\n' +
-    '  --routes /,/settings   routes to walk (default /)\n' +
-    '  --max 8                iteration ceiling\n' +
-    '  --dry                  compute patches, write nothing\n' +
-    '  --allow-tokens         permit shared design-token retints (off by default)\n' +
-    '  --git                  commit each verified fix on its own branch;\n' +
-    '                         requires a clean tree so its edits stay yours to review\n' +
-    '  --branch <name>        branch to use with --git (default kintsugi/ui-fixes)\n' +
-    '  --watch <minutes>      keep running on a cadence; each cycle reports only\n' +
-    '                         what changed, and the ledger stops it re-proposing\n' +
-    '                         patches an earlier cycle already disproved\n' +
-    '  --cycles <n>           stop after n cycles (default: until interrupted)\n' +
-    '  --themes light,dark    measure each route under both colour schemes; most\n' +
-    '                         contrast bugs exist in exactly one theme\n' +
-    '  --policy <id>          threshold profile: wcag-22-aa (default), wcag-22-aaa,\n' +
-    '                         mobile-touch, botstacks-product, performance-strict\n' +
-    '  --attach http://localhost:9222\n' +
-    '                         use a browser you already signed into, instead of\n' +
-    '                         launching a fresh one that can only see public pages',
+    '  --config <path>      config file (default <source>/kintsugi.config.json)\n' +
+    '  --checks a,b,c       run only these checks\n' +
+    '  --budget <n>         repair attempts per finding (default 2)\n' +
+    '  --max <n>            iteration ceiling (default 12)\n' +
+    '  --dry                survey every finding, write nothing\n' +
+    '  --allow-shared       permit patches on files other modules import\n' +
+    '                       (escalated by default — that is a decision, not a fix)\n' +
+    '  --llm-mock <path>    replay canned proposals (keyless demo/tests)\n' +
+    '  --state <path>       ledger path (default ~/.kintsugi/ledgers/<hash>.json)\n' +
+    '  --quarantined-ok     exit 0 when only quarantined findings remain\n' +
+    '  --git                commit each verified fix on its own branch; requires\n' +
+    '                       a clean tree so its edits stay yours to review\n' +
+    '  --branch <name>      branch to use with --git (default kintsugi/fixes)\n' +
+    '  --json               machine-readable final report on stdout\n' +
+    '  --list-checks        print the checks that would run, then exit',
   );
   process.exit(2);
 }
 
 const config: RunConfig = {
-  target,
-  sourceRoot: resolve(source),
-  routes: (args.get('routes') ?? '/').split(',').map((r) => r.trim()).filter(Boolean),
-  maxIterations: Number(args.get('max') ?? 8),
+  sourceRoot,
+  checks,
+  budget: Number(args.get('budget') ?? loaded.budget),
+  maxIterations: Number(args.get('max') ?? loaded.maxIterations),
   dryRun: args.has('dry'),
-  allowTokens: args.has('allow-tokens'),
-  attach: args.get('attach'),
-  policy: args.get('policy'),
-  themes: args.get('themes')?.split(',').map(t => t.trim()).filter(Boolean) as ('light'|'dark')[] | undefined,
+  allowShared: args.has('allow-shared'),
+  llmMock: args.get('llm-mock'),
+  statePath: args.get('state'),
   git: args.has('git'),
   branch: args.get('branch'),
+  quarantinedOk: args.has('quarantined-ok'),
 };
 
 const ICON = {
@@ -79,50 +88,15 @@ const ICON = {
 const say = (e: LoopEvent) =>
   console.log(`  ${ICON[e.phase]} [${e.iteration}] ${e.phase.padEnd(8)} ${e.message}`);
 
-// ---- continuous mode -------------------------------------------------------
-
-if (args.has('watch')) {
-  const everyMinutes = Number(args.get('watch'));
-  if (!Number.isFinite(everyMinutes) || everyMinutes <= 0) {
-    console.error('--watch takes a positive number of minutes, e.g. --watch 30');
-    process.exit(2);
-  }
-  const cycles = args.get('cycles') ? Number(args.get('cycles')) : undefined;
-
-  console.log(
-    `  Watching ${config.target} every ${everyMinutes} minute(s)` +
-    `${cycles ? ` for ${cycles} cycle(s)` : ''}. Ctrl-C to stop.\n`,
-  );
-
-  // Per-cycle detail is suppressed: on a cadence the useful signal is what
-  // changed, not a full replay of a loop that mostly reaches the same
-  // conclusion it reached last time.
-  await watch({ ...config, everyMinutes, maxCycles: cycles }, () => {},
-    (r) => formatCycle(r).forEach((l) => console.log(l)));
-
-  console.log('\n  stopped');
-  process.exit(0);
-}
-
-// ---- single run ------------------------------------------------------------
-
 const loop = new Loop(config, say);
-
 const state = await loop.run();
 
-const committed = state.attempts.filter((a) => a.outcome === 'committed');
-const rejected = state.attempts.filter((a) => a.outcome !== 'committed');
+const summary = summarise(state, loop.actionableRemaining());
 
-console.log(`\n  ${state.status.toUpperCase()} after ${state.iteration} iteration(s)`);
-console.log(`  ${committed.length} patch(es) committed, ${rejected.length} rejected and reverted`);
-console.log(`  ${state.findings.length} finding(s) outstanding\n`);
-
-for (const a of committed) {
-  console.log(`  ✓ ${a.patch.rationale}`);
-}
-for (const f of state.findings) {
-  console.log(`  · [${f.severity}] ${f.summary}`);
+if (args.has('json')) {
+  console.log(JSON.stringify(reportJson(summary, sourceRoot), null, 2));
+} else {
+  console.log(`\n  ${summaryLines(summary, sourceRoot).join('\n  ')}\n`);
 }
 
-// Non-zero when defects remain, so this can gate a pipeline.
-process.exit(state.findings.length > 0 ? 1 : 0);
+process.exit(exitCodeFor(summary, config.quarantinedOk ?? false));
