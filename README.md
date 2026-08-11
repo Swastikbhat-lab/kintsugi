@@ -100,6 +100,18 @@ engine detects the repo's toolchain and runs what its own scripts offer:
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
 - **Mixed** repos get the union of their toolchains
 
+**Two engines, one loop.** The full orchestrator is TypeScript (agent
+graph, watch mode, model proposer, all languages). A Python-only repo — no
+`package.json` — is automatically dispatched to the **Python engine**
+(`py/`), a faithful port of the check runner and repair rules that needs no
+Node runtime at all: discovery, pytest/ruff/go runs, the strict parser, the
+F401/I001/assertion-constant rules, the verify gate, and the ledger all run
+under a plain `python` interpreter. `run-loop.sh` picks it automatically
+(or set `KINTSUGI_RUNNER=python|node`); invoke it directly with
+`python -m kintsugi --source <repo>` from `py/`. The two engines share the
+same ledger format, report shape, and exit-code contract, so a repo audited
+by both keeps one memory.
+
 Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing — a default check that crashes on
 arrival would be a broken harness, not a defect. `--list-checks` shows what

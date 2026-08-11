@@ -1,0 +1,9 @@
+[project]
+name = "kintsugi-py"
+version = "0.2.0"
+description = "Kintsugi Python engine: check runner + repair rules with no Node runtime"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

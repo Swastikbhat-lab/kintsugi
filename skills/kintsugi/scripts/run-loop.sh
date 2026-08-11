@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Run the Kintsugi loop against any repo, from any working directory.
 #
-# Locates the engine in order:
+# Two engines:
+#   node   — the full TypeScript engine (default): agent graph, watch mode,
+#            all languages, model proposer. Needs Node.
+#   python — the Python engine: check runner + repair rules for non-Node
+#            repos (Python, Go). Auto-selected for Python-only repos; no
+#            Node runtime needed at all. Override with KINTSUGI_RUNNER=node|python.
+#
+# The engine is located in order:
 #   1. $KINTSUGI_ENGINE (an env var pointing at an engine checkout)
 #   2. <skill-dir>/engine            (installed layout)
 #   3. <skill-dir>/../../..          (engine repo checkout layout)
@@ -41,10 +48,46 @@ find_engine() {
   echo "$eng"
 }
 
-ENGINE="$(find_engine)"
-if [[ ! -d "$ENGINE/node_modules" ]]; then
-  echo "kintsugi: installing engine dependencies (one-time)…" >&2
-  npm --prefix "$ENGINE" install --no-audit --no-fund >/dev/null 2>&1 || npm --prefix "$ENGINE" install
+# Resolve --source early so the runner can be chosen from the target repo.
+resolve_source() {
+  local prev="" src=""
+  for a in "$@"; do
+    if [[ "$prev" == "--source" && -n "$a" ]]; then src="$a"; fi
+    prev="$a"
+  done
+  if [[ -z "$src" ]]; then
+    echo "$INVOKE_DIR"
+  elif [[ "$src" == /* ]]; then
+    echo "$src"
+  else
+    echo "$(cd "$INVOKE_DIR" && pwd)/$src"
+  fi
+}
+
+is_python_repo() {
+  local d="$1"
+  [[ -d "$d" ]] || return 1
+  # Mixed repos (package.json + pyproject.toml) stay on the Node engine,
+  # which speaks both; the Python engine is the non-Node path.
+  [[ -f "$d/package.json" ]] && return 1
+  for m in pyproject.toml setup.py setup.cfg Pipfile poetry.lock; do
+    [[ -f "$d/$m" ]] && return 0
+  done
+  for r in "$d"/requirements*.txt; do
+    [[ -f "$r" ]] && return 0
+  done
+  return 1
+}
+
+SRC="$(resolve_source "$@")"
+
+RUNNER="${KINTSUGI_RUNNER:-}"
+if [[ -z "$RUNNER" ]]; then
+  if is_python_repo "$SRC" && { command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; }; then
+    RUNNER=python
+  else
+    RUNNER=node
+  fi
 fi
 
 # Rewrite relative path-bearing flags against the invocation directory, so
@@ -63,5 +106,22 @@ for a in "$@"; do
   esac
   prev="$a"
 done
+
+if [[ "$RUNNER" == "python" ]]; then
+  ENG="$(find_engine)"
+  [[ -d "$ENG/py" ]] || { echo "kintsugi: engine has no Python runner — re-sync the engine" >&2; exit 1; }
+  PY="${PYTHON:-}"
+  if [[ -z "$PY" ]]; then
+    PY="$(command -v python3 || command -v python)"
+  fi
+  echo "kintsugi: Python engine — no Node runtime needed" >&2
+  (cd "$ENG/py" && exec "$PY" -m kintsugi "${args[@]}")
+fi
+
+ENGINE="$(find_engine)"
+if [[ ! -d "$ENGINE/node_modules" ]]; then
+  echo "kintsugi: installing engine dependencies (one-time)…" >&2
+  npm --prefix "$ENGINE" install --no-audit --no-fund >/dev/null 2>&1 || npm --prefix "$ENGINE" install
+fi
 
 exec npm --prefix "$ENGINE" run --silent cli -- "${args[@]}"

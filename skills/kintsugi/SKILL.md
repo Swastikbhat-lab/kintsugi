@@ -70,6 +70,13 @@ own scripts offer — no config file needed for the common cases:
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
 - **Mixed** repos get the union of their toolchains
 
+**Two engines, one loop.** The orchestrator is TypeScript (agent graph,
+watch mode, model proposer). A Python-only repo (no `package.json`) is
+auto-dispatched to the **Python engine** — a faithful port of the check
+runner and repair rules (`py/`) that needs no Node runtime. `run-loop.sh`
+chooses it automatically (override with `KINTSUGI_RUNNER=python|node`), or
+run it directly: `python -m kintsugi --source <repo>` from `py/`.
+
 Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing. `--list-checks` prints what would
 run. The mechanical repair rules cover TypeScript (dead declarations,

@@ -1,0 +1,88 @@
+"""Running check commands and turning their output into findings.
+
+Checks run with cwd = source root, shell-resolved, so `pytest` and `ruff`
+find the repo's own toolchain. A non-zero exit with no parseable finding is
+a *crash*, not a defect: the loop reports it and refuses to heal it, because
+a repair loop that "heals" a broken harness is a repair loop that rewrites
+working code because its own plumbing failed.
+"""
+
+import os
+import subprocess
+import time
+
+from .parsers import parse_lines, parse_strict
+
+
+def _parse(defn, output: str, cwd: str):
+    parser = defn.get("parser")
+    if parser == "strict":
+        return parse_strict(output, cwd, defn["name"])
+    if parser == "lines":
+        return parse_lines(output, cwd, defn["name"])
+    # tsc/tap/spec output shapes belong to the Node engine; a config that
+    # declares them here is a config that cannot be read.
+    return []
+
+
+def run_check(defn, cwd: str, timeout_ms: int = 120_000):
+    """Run one check command and return a CheckResult-shaped dict."""
+    started = time.time()
+    env = dict(os.environ)
+    env.pop("NODE_TEST_CONTEXT", None)
+
+    try:
+        proc = subprocess.Popen(
+            defn["command"],
+            shell=True,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+    except OSError as err:
+        return {
+            "check": defn["name"],
+            "findings": [],
+            "exitCode": -1,
+            "durationMs": int((time.time() - started) * 1000),
+            "crashed": True,
+            "output": f"failed to start: {err}",
+        }
+
+    killed = False
+    try:
+        output, _ = proc.communicate(timeout=timeout_ms / 1000)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        output, _ = proc.communicate()
+        code = -2
+        killed = True
+
+    output = output or ""
+    duration_ms = int((time.time() - started) * 1000)
+    # Exit 0 means the check passed — its output may still *look* like
+    # findings, but a passing check contributes no findings by definition.
+    # Crash means *no typed output at all* — a broken harness.
+    parsed = [] if code == 0 else _parse(defn, output, cwd)
+
+    # A check owns its defect class: filterCodes keeps only the codes it was
+    # configured for, and a configured severity overrides the parser default.
+    findings = parsed
+    if defn.get("filterCodes"):
+        allowed = set(defn["filterCodes"])
+        findings = [f for f in findings if f.get("code") in allowed]
+    if defn.get("severity"):
+        findings = [{**f, "severity": defn["severity"]} for f in findings]
+
+    return {
+        "check": defn["name"],
+        "findings": findings,
+        "exitCode": code,
+        "durationMs": duration_ms,
+        "crashed": killed or (code != 0 and len(parsed) == 0),
+        "output": output,
+    }
