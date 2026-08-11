@@ -57,6 +57,10 @@ export function buildImportGraph(sourceRoot: string): ImportGraph {
       if (target && fileSet.has(target)) set.add(target);
     }
     deps.set(file, set);
+    // A file imported by a *test* is not a shared product module — tests
+    // reference modules they exercise, and editing those modules is normal.
+    // Only product-code importers count toward blast radius.
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(file)) continue;
     for (const t of set) {
       if (!importers.has(t)) importers.set(t, new Set());
       importers.get(t)!.add(file);

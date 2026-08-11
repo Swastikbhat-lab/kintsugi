@@ -1,9 +1,9 @@
 {
   "checks": [
     { "name": "typecheck", "command": "npm run typecheck", "parser": "tsc", "severity": "major" },
-    { "name": "lint", "command": "npm run lint", "parser": "tsc", "severity": "minor" },
+    { "name": "lint", "command": "npm run lint", "parser": "tsc", "severity": "minor", "filterCodes": ["TS6133"] },
     { "name": "test", "command": "npm test", "parser": "tap", "severity": "blocker" },
-    { "name": "version", "command": "npm run check:version", "parser": "lines", "severity": "minor" }
+    { "name": "version", "command": "node checks/version-check.mjs", "parser": "lines", "severity": "minor" }
   ],
   "budget": 2,
   "maxIterations": 12,

@@ -27,7 +27,10 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 
 const sourceRoot = resolve(args.get('source') ?? '.');
-const loaded = loadConfig(sourceRoot, args.get('config'));
+// An explicit --config is resolved against where the command was run; the
+// default (no flag) stays <source>/kintsugi.config.json.
+const configPath = args.get('config') ? resolve(args.get('config')!) : undefined;
+const loaded = loadConfig(sourceRoot, configPath);
 
 let checks = loaded.checks;
 if (args.has('checks')) {

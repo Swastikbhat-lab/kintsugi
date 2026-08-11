@@ -84,6 +84,8 @@ export interface CheckDef {
   severity?: Severity;
   /** Repair-attempt budget per finding from this check. */
   budget?: number;
+  /** Only findings with these codes are kept — a check owns its defect class. */
+  filterCodes?: string[];
 }
 
 export interface CheckResult {

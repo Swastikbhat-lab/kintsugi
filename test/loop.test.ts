@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Loop } from '../src/loop.js';
 import { copyFixture, tempStatePath } from './helpers.js';
@@ -7,18 +8,16 @@ import type { RunConfig } from '../src/types.js';
 
 test('the loop repairs five defect classes and quarantines the sixth', async () => {
   const source = copyFixture();
+  // Same config the fixture ships with — one source of truth for the demo
+  // and the end-to-end test.
+  const cfg = JSON.parse(readFileSync(resolve(import.meta.dirname, '../fixture/kintsugi.config.json'), 'utf8'));
   const config: RunConfig = {
     sourceRoot: source,
-    checks: [
-      { name: 'typecheck', command: 'npm run typecheck', parser: 'tsc', severity: 'major' },
-      { name: 'lint', command: 'npm run lint', parser: 'tsc', severity: 'minor' },
-      { name: 'test', command: 'npm test', parser: 'tap', severity: 'blocker' },
-      { name: 'version', command: 'npm run check:version', parser: 'lines', severity: 'minor' },
-    ],
-    budget: 2,
-    maxIterations: 12,
+    checks: cfg.checks,
+    budget: cfg.budget,
+    maxIterations: cfg.maxIterations,
     dryRun: false,
-    allowShared: false,
+    allowShared: cfg.allowShared,
     llmMock: resolve(import.meta.dirname, '../fixture/proposals/tax-rate.json'),
     statePath: tempStatePath(),
   };

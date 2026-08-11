@@ -13,11 +13,28 @@ import { fingerprint } from './fingerprint.js';
 
 const SKIP = /(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/;
 
-/** Resolve a reported path against the source root; drop anything outside. */
+/**
+ * Normalize a reported path against the source root; drop anything outside.
+ * Returns forward-slash absolute paths so the rest of the engine never has
+ * to care which OS produced them.
+ */
 function normalizePath(p: string, cwd: string): string | undefined {
-  const cleaned = p.trim().replace(/^file:\/\//, '').replace(/\\/g, '/');
+  const cleaned = p.trim().replace(/\\/g, '/');
   if (!cleaned) return undefined;
-  const abs = (isAbsolute(cleaned) ? cleaned : resolve(cwd, cleaned)).replace(/\\/g, '/');
+
+  // `file:///C:/repo/x.ts` → `C:/repo/x.ts`; `file:///repo/x.ts` → `/repo/x.ts`.
+  // Stripping `file://` wholesale would drop the root slash on POSIX and turn
+  // an absolute path into a relative one.
+  let abs: string;
+  if (cleaned.startsWith('file://')) {
+    let rest = cleaned.slice('file://'.length);
+    if (/^\/[A-Za-z]:/.test(rest)) rest = rest.slice(1);
+    abs = isAbsolute(rest) ? rest : resolve(cwd, rest);
+  } else {
+    abs = isAbsolute(cleaned) ? cleaned : resolve(cwd, cleaned);
+  }
+  abs = abs.replace(/\\/g, '/');
+
   const rel = relative(cwd, abs).replace(/\\/g, '/');
   if (rel.startsWith('..') || SKIP.test(rel)) return undefined;
   return abs;
@@ -62,12 +79,12 @@ function extractTscEvidence(code: string, message: string): Record<string, unkno
       ? message.match(/has no exported member '([^']+)'/)?.[1]
       : message.match(/declares '([^']+)' locally/)?.[1];
     // tsc wraps the module path in *additional* quotes inside the message:
-    // Module '"/abs/pricing.ts"' has no exported member 'lineTotal'.
-    // TS2459 instead reports the specifier as written ('./pricing.js').
-    const mod = message.match(/Module '(\"?)([^'\"]+)\1'/);
+    // Module '"./pricing.js"' has no exported member 'lineTotal'. TS2459
+    // reports the specifier as written; TS2305 the resolved path.
+    const mod = message.match(/Module '"?([^'"]+)"?'/);
     return {
       ...(member ? { member } : {}),
-      ...(mod ? { module: mod[2] } : {}),
+      ...(mod ? { module: mod[1] } : {}),
     };
   }
   return {};
@@ -77,22 +94,20 @@ function extractTscEvidence(code: string, message: string): Record<string, unkno
 
 /**
  * Node's built-in test runner (TAP output), as produced by `node --test` /
- * `tsx --test`. A failed test is a block:
+ * `tsx --test --test-reporter=tap`. A failed test is a block:
  *
- *   not ok 1 - applyTax applies the 10% tax rate
+ *   not ok 2 - applyTax applies the 10% tax rate
  *     ---
- *     AssertionError: expected 8 to equal 10
+ *     error: AssertionError: expected 8 to equal 10
  *         at file:///…/test/pricing.test.ts:10:23
+ *     location: 'C:\…\test\pricing.test.ts:6:1'
  */
 export function parseTap(output: string, cwd: string, check: string): Finding[] {
   const findings: Finding[] = [];
   const lines = output.split('\n');
-  // Node 22 indents the per-file TAP block, so the anchors must tolerate
-  // leading whitespace.
+  // The per-file TAP block is indented, so the anchors tolerate whitespace.
   const notOk = /^\s*not ok\s+\d+\s+-\s+(.+)$/;
-  // A failed test block names its location either as a stack line or as the
-  // TAP `location:` field.
-  const atRe = /^\s*at\s+(?:file:\/\/\/?)?(.+?):(\d+):\d+\)?/;
+  const atRe = /^\s*at\s+(.+?):(\d+):\d+\)?/;
   const locationRe = /^\s*location:\s*'(.+?):(\d+):(\d+)'/;
 
   for (let i = 0; i < lines.length; i++) {
@@ -140,7 +155,7 @@ export function parseTap(output: string, cwd: string, check: string): Finding[] 
 
 /**
  * The plain-text contract for custom checks. Each non-empty line is either
- * `path:line: message` or a bare message; a `path` must look like one (a
+ * `path[:line]: message` or a bare message; a `path` must look like one (a
  * dot-extension or a separator), so a message like `version-drift: …` is not
  * mistaken for a file named `version-drift`.
  */
@@ -149,12 +164,12 @@ export function parseLines(output: string, cwd: string, check: string): Finding[
   for (const raw of output.split('\n')) {
     const line = raw.trim();
     if (!line) continue;
-    const m = line.match(/^(?:([^:]+):(\d+):\s*)?(.*)$/);
+    const m = line.match(/^(?:([^:]+):(\d+:)?\s*)?(.*)$/);
     const head = m?.[1];
     const looksLikeFile =
       !!head && !head.includes(' ') && (/\.\w+$/.test(head) || /[\\/]/.test(head));
     const file = looksLikeFile ? normalizePath(head!, cwd) : undefined;
-    const lineNo = looksLikeFile && m?.[2] ? Number(m[2]) : undefined;
+    const lineNo = looksLikeFile && m?.[2] ? Number(m[2].slice(0, -1)) : undefined;
     const message = (looksLikeFile ? m?.[3] : line).trim();
     if (!message) continue;
 

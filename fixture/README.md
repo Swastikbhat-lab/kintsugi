@@ -1,6 +1,6 @@
 # Kintsugi fixture
 
-A deliberately-broken package the loop repairs. Version 0.1.0.
+A deliberately-broken package the loop repairs. Version 0.2.0.
 
 The planted defects, one per check domain:
 
@@ -10,7 +10,7 @@ The planted defects, one per check domain:
 - **typecheck** — an import of `lineTotal`, which exists in `src/pricing.ts`
   but is not exported (TS2459)
 - **test** — `applyTax` returns 8% when the tests assert 10%
-- **version** — this file says 0.1.0 while `package.json` says 0.2.0
+- **version** — this README and `package.json` disagree on the version
 
 One defect is deliberately unrepairable: `src/app.ts` imports `loadConfig`,
 and no such function exists anywhere. No mechanical edit can write it — a

@@ -21,7 +21,14 @@ export function runCheck(
     let output = '';
     let killed = false;
 
-    const child = spawn(def.command, { cwd, shell: true, windowsHide: true, env: process.env });
+    // Checks are external commands and must behave as if a scheduler ran
+    // them — never as a nested child of whatever harness Kintsugi itself is
+    // running under. Without this, a `node --test` parent sets
+    // NODE_TEST_CONTEXT and the repo's own `npm test` silently skips its
+    // files ("recursively within a test file"), exiting 0 with no results.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(def.command, { cwd, shell: true, windowsHide: true, env });
     const timer = setTimeout(() => {
       killed = true;
       child.kill();
@@ -48,13 +55,22 @@ export function runCheck(
       // Exit 0 means the check passed — its output may still *look* like
       // findings (a version check that prints "version: ok"), but a passing
       // check contributes no findings by definition.
-      const findings = code === 0 ? [] : parse(def, output, cwd);
+      // Crash means *no typed output at all* — a broken harness. Exit non-zero
+      // with parseable findings is a defect, even when the filter below drops
+      // every one of them (another check owns that defect class).
+      const parsed = code === 0 ? [] : parse(def, output, cwd);
+      // A check owns its defect class: tsc-based lint only keeps the codes
+      // it was configured for, so the same type error is not reported twice
+      // by two checks and repaired (or quarantined) twice.
+      const findings = def.filterCodes?.length
+        ? parsed.filter((f) => def.filterCodes!.includes(f.code ?? ''))
+        : parsed;
       resolvePromise({
         check: def.name,
         findings,
         exitCode: killed ? -2 : (code ?? -1),
         durationMs,
-        crashed: killed || (code !== 0 && findings.length === 0),
+        crashed: killed || (code !== 0 && parsed.length === 0),
         output,
       });
     });
