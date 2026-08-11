@@ -155,6 +155,26 @@ export class Loop {
       this.state.status = 'failed';
       this.say('settle', `Run failed: ${(err as Error).message}`);
     } finally {
+      // A final settle span mirroring the ledger's attempt records — one
+      // entry per attempt with the same outcome vocabulary — so the trace
+      // and the ledger tell the same story and are joinable on
+      // fingerprint + outcome.
+      try {
+        this.tracer.span('settle', {
+          status: this.state.status,
+          iterations: this.state.iteration,
+          attempts: this.state.attempts.map((a) => ({
+            fingerprint: a.fingerprint,
+            outcome: a.outcome,
+            patch: { file: a.patch?.file, rationale: a.patch?.rationale },
+            provider: a.provider,
+            collateral: a.collateral,
+            at: a.at,
+          })),
+        });
+      } catch {
+        // best effort
+      }
       this.tracer.flush();
       if (this.config.git && this.gitBase) {
         const commits = await logSince(this.config.sourceRoot, this.gitBase);
@@ -400,9 +420,22 @@ export class Loop {
           outcome = v.outcome;
           collateral = v.collateral.map((f) => f.fingerprint);
           collateralDetail = v.collateral.map((f) => `${f.check}: ${f.summary}`);
+          // The span mirrors the ledger's attempt record: same fingerprint,
+          // same patch identity, same outcome vocabulary — so a trace is
+          // queryable by finding the way the ledger is.
           this.tracer.span('verify', {
+            fingerprint: target.fingerprint,
+            check: target.check,
+            code: target.code ?? '',
+            patch: {
+              file: patch.file,
+              find: patch.find,
+              replace: patch.replace,
+              rationale: patch.rationale,
+            },
             outcome: v.outcome,
-            collateral: collateral.length,
+            collateral: collateralDetail,
+            provider: !!this.provider,
             durationMs: v.runs.reduce((s, r) => s + r.durationMs, 0),
           });
         } catch (err) {

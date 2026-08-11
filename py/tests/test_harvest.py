@@ -218,6 +218,80 @@ def test_tracer_is_inert_without_keys():
     assert Tracer.create().active is False
 
 
+class _FakeClient:
+    """Records what the tracer hands to Langfuse so tests can assert the
+    ledger-mirroring shape without a network or credentials."""
+
+    def __init__(self):
+        self.spans = []
+        self.generations = []
+
+    def trace(self, **kw):
+        pass
+
+    def span(self, **kw):
+        self.spans.append(kw)
+
+    def generation(self, **kw):
+        self.generations.append(kw)
+
+    def flush(self):
+        pass
+
+
+def test_tracer_verify_span_mirrors_the_ledger_attempt_shape():
+    fake = _FakeClient()
+    tracer = Tracer(fake)
+    tracer.start_run({"sourceRoot": "/repo", "checks": [{"name": "py:test"}], "budget": 2})
+    tracer.span(
+        "verify",
+        fingerprint="abc123", check="py:bandit", code="B105",
+        patch={"file": "/repo/src/a.py", "find": "PASSWORD = \"x\"",
+               "replace": "PASSWORD = os.environ[...]", "rationale": "move to env"},
+        outcome="committed", collateral=["py:lint: F821 Undefined name"],
+        provider=False, durationMs=120,
+    )
+    assert len(fake.spans) == 1
+    s = fake.spans[0]
+    # Same vocabulary the ledger records per attempt — joinable on
+    # fingerprint + outcome.
+    assert s["input"]["fingerprint"] == "abc123"
+    assert s["input"]["outcome"] == "committed"
+    assert s["input"]["patch"]["find"] == "PASSWORD = \"x\""
+    assert s["input"]["collateral"] == ["py:lint: F821 Undefined name"]
+    assert s["input"]["provider"] is False
+
+
+def test_tracer_generation_carries_real_usage_and_derived_cost():
+    fake = _FakeClient()
+    tracer = Tracer(fake)
+    tracer.start_run({"sourceRoot": "/repo", "checks": [], "budget": 2})
+    tracer.generation(
+        "propose", {"inputTokens": 1000, "outputTokens": 500},
+        check="py:test", candidates=2,
+    )
+    assert len(fake.generations) == 1
+    g = fake.generations[0]
+    assert g["usage"] == {"input": 1000, "output": 500, "total": 1500}
+    # 1000/1M * $5 + 500/1M * $25 = 0.005 + 0.0125
+    assert g["metadata"]["costUsd"] == pytest.approx(0.0175)
+
+
+def test_tracer_settle_span_carries_the_attempt_history():
+    fake = _FakeClient()
+    tracer = Tracer(fake)
+    tracer.start_run({"sourceRoot": "/repo", "checks": [], "budget": 2})
+    tracer.span(
+        "settle",
+        status="converged", iterations=3,
+        attempts=[{"fingerprint": "f1", "outcome": "committed",
+                   "patch": {"file": "/repo/src/a.py", "rationale": "r"},
+                   "provider": False, "collateral": [], "at": "t"}],
+    )
+    assert fake.spans[0]["input"]["attempts"][0]["fingerprint"] == "f1"
+    assert fake.spans[0]["input"]["attempts"][0]["outcome"] == "committed"
+
+
 # ------------------------------------------------------------- discovery
 
 def test_python_repo_discovers_the_full_toolchain(tmp_path):

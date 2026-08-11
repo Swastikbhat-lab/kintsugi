@@ -211,6 +211,19 @@ remembers — and quarantines the sixth. The evidence from a real run is in
 - **Langfuse traces end-to-end** — the tracer is wired and inert without
   keys; a live dashboard needs a project with `LANGFUSE_*` env set.
 
+## Observability
+
+Set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (optionally
+`LANGFUSE_HOST`, default `https://cloud.langfuse.com`) and the loop traces
+itself to Langfuse, mirroring the ledger's structure: one trace per run;
+`observe`/`verify`/`settle` spans; and per-attempt `verify` spans carrying
+the same fingerprint, patch shape, outcome, collateral, and provider fields
+the ledger records — joinable on fingerprint + outcome. Model calls are
+`generation` events with the usage the provider actually reported
+(`KINTSUGI_INPUT_PRICE`/`KINTSUGI_OUTPUT_PRICE` default $5/$25 per 1M, for
+cost), never fabricated numbers. Without keys, or without the `langfuse`
+SDK, the tracer is an inert no-op and can never take the loop down.
+
 ## The point
 
 Auto-fixers fail one way that matters more than all others: they apply

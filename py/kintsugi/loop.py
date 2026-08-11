@@ -149,6 +149,7 @@ class Loop:
                 self.say("diagnose", "Nothing actionable left. Converged.")
                 self.state["status"] = "converged"
                 self.say("settle", "Converged.")
+                self._tracer_summary()
                 self.tracer.flush()
                 return self.state
 
@@ -157,8 +158,35 @@ class Loop:
 
         self.state["status"] = "exhausted"
         self.say("settle", f"Iteration budget ({max_iterations}) reached")
+        self._tracer_summary()
         self.tracer.flush()
         return self.state
+
+    def _tracer_summary(self) -> None:
+        """A final settle span mirroring the ledger's attempt records — one
+        entry per attempt with the same outcome vocabulary — so the trace
+        and the ledger tell the same story and are joinable on
+        fingerprint + outcome."""
+        try:
+            self.tracer.span(
+                "settle",
+                status=self.state.get("status"),
+                iterations=self.state.get("iteration", 0),
+                attempts=[
+                    {
+                        "fingerprint": a["fingerprint"],
+                        "outcome": a["outcome"],
+                        "patch": {"file": (a.get("patch") or {}).get("file"),
+                                   "rationale": (a.get("patch") or {}).get("rationale")},
+                        "provider": a.get("provider"),
+                        "collateral": a.get("collateral"),
+                        "at": a.get("at"),
+                    }
+                    for a in self.state.get("attempts", [])
+                ],
+            )
+        except Exception:
+            pass  # best effort
 
     def _run_all(self, checks, source_root):
         with ThreadPoolExecutor(max_workers=max(len(checks), 1)) as ex:
@@ -264,10 +292,23 @@ class Loop:
             collateral = [f["fingerprint"] for f in v["collateral"]]
             collateral_detail = [f"{f['check']}: {f['summary']}" for f in v["collateral"]]
             runs = v["runs"]
+            # The span mirrors the ledger's attempt record: same fingerprint,
+            # same patch identity, same outcome vocabulary — so a trace is
+            # queryable by finding the way the ledger is.
             self.tracer.span(
                 "verify",
+                fingerprint=target["fingerprint"],
+                check=target["check"],
+                code=target.get("code") or "",
+                patch={
+                    "file": patch.get("file"),
+                    "find": patch.get("find"),
+                    "replace": patch.get("replace"),
+                    "rationale": patch.get("rationale"),
+                },
                 outcome=v["outcome"],
-                collateral=len(v["collateral"]),
+                collateral=collateral_detail,
+                provider=bool(self.provider),
                 durationMs=sum(r["durationMs"] for r in v["runs"]),
             )
         except Exception as err:
