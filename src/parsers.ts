@@ -309,19 +309,23 @@ export function parseStrict(output: string, cwd: string, check: string): Finding
   // then the message. The path must look like a file (an extension or a
   // separator) and never contain whitespace, so `FAIL	example.com/x	0.02s`
   // and `1 failed in 0.12s` cannot become phantom findings.
-  const re = /^\s*(?:(?:[A-Za-z]:)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
+  const re = /^\s*(?:(?:([A-Za-z]):)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
   for (let i = 0; i < lines.length; i++) {
     // Trim CR/LF and padding: tool output on Windows is CRLF, and a trailing
     // `\r` defeats the `$` anchor (it is a line terminator).
     const m = lines[i].trim().match(re);
     if (!m) continue;
-    const head = m[1];
+    // The drive letter is optional and captured separately — a regex that
+    // swallows `C:` into a non-capturing group loses it from the head,
+    // leaving a win32 root-relative path (`/Users/…`) that passes the
+    // outside-root check with the drive gone.
+    const head = (m[1] ? m[1] + ':' : '') + m[2];
     if (!(/\.\w+$/.test(head) || /[\\/]/.test(head))) continue;
     const file = normalizePath(head, cwd);
     if (!file) continue;
-    const line = Number(m[2]);
-    const col = m[3] ? Number(m[3]) : undefined;
-    const message = m[4].trim();
+    const line = Number(m[3]);
+    const col = m[4] ? Number(m[4]) : undefined;
+    const message = m[5].trim();
     // A traceback frame (`test_x.py:7: in test_tax_rate`) is scaffolding;
     // the error line that follows it carries the defect.
     if (/^in [\w.]+$/.test(message)) continue;
@@ -434,15 +438,16 @@ export function parseRust(output: string, cwd: string, check: string): Finding[]
   // Pass 3 — strict-style anchored lines: clippy/rustc `--message-format=
   // short` prints `path:line:col: warning|error…: message`, and cargo can
   // emit other `path:line: message` shapes.
-  const re = /^\s*(?:(?:[A-Za-z]:)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
+  const re = /^\s*(?:(?:([A-Za-z]):)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
   for (const raw of lines) {
     const m = raw.trim().match(re);
     if (!m) continue;
-    const head = m[1];
+    // Same drive-letter preservation as parseStrict.
+    const head = (m[1] ? m[1] + ':' : '') + m[2];
     if (!(/\.\w+$/.test(head) || /[\\/]/.test(head))) continue;
-    const message = m[4].trim();
+    const message = m[5].trim();
     if (!message) continue;
-    push(head, Number(m[2]), m[3] ? Number(m[3]) : undefined, message);
+    push(head, Number(m[3]), m[4] ? Number(m[4]) : undefined, message);
   }
 
   return findings;

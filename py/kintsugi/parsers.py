@@ -70,8 +70,10 @@ def normalize_path(p: str, cwd: str) -> str | None:
 # Optional drive letter, then a path token, then `:line`, optional `:col`,
 # then the message. The path must look like a file (an extension or a
 # separator) and never contain whitespace, so `FAIL\texample.com/x\t0.02s`
-# and `1 failed in 0.12s` cannot become phantom findings.
-_STRICT_RE = re.compile(r"^\s*(?:(?:[A-Za-z]:)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$")
+# and `1 failed in 0.12s` cannot become phantom findings. The drive letter
+# is captured separately — a non-capturing group would swallow `C:` and
+# leave a root-relative head that passes the outside-root check drive-less.
+_STRICT_RE = re.compile(r"^\s*(?:(?:([A-Za-z]):)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$")
 _FILEISH = re.compile(r"\.\w+$|[\\/]")
 _FRAME = re.compile(r"^in [\w.]+$")
 _WARNING = re.compile(r"^[A-Za-z][\w.]*Warning:\s")
@@ -97,15 +99,15 @@ def parse_strict(output: str, cwd: str, check: str):
         m = _STRICT_RE.match(raw.strip())
         if not m:
             continue
-        head = m.group(1)
+        head = (m.group(1) + ":" if m.group(1) else "") + m.group(2)
         if not _FILEISH.search(head):
             continue
         file = normalize_path(head, cwd)
         if not file:
             continue
-        line = int(m.group(2))
-        col = int(m.group(3)) if m.group(3) else None
-        message = m.group(4).strip()
+        line = int(m.group(3))
+        col = int(m.group(4)) if m.group(4) else None
+        message = m.group(5).strip()
         # A traceback frame (`test_x.py:7: in test_tax_rate`) is scaffolding;
         # the error line that follows it carries the defect.
         if _FRAME.match(message):
@@ -286,12 +288,12 @@ def parse_rust(output: str, cwd: str, check: str):
         m = _STRICT_RE.match(raw.strip())
         if not m:
             continue
-        head = m.group(1)
+        head = (m.group(1) + ":" if m.group(1) else "") + m.group(2)
         if not _FILEISH.search(head):
             continue
-        message = m.group(4).strip()
+        message = m.group(5).strip()
         if not message:
             continue
-        push(head, int(m.group(2)), int(m.group(3)) if m.group(3) else None, message)
+        push(head, int(m.group(3)), int(m.group(4)) if m.group(4) else None, message)
 
     return findings

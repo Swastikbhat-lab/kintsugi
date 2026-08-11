@@ -77,6 +77,9 @@ def test_strict_reads_a_drive_letter_path_anchored_inside_the_root():
     root = os.path.abspath(CWD).replace("\\", "/")
     f = parse_strict(f"{root}/src/tax.py:4: F401 'os' imported but unused", root, "py:lint")
     assert len(f) == 1
+    # The finding must keep the drive letter — a regex that swallows `C:`
+    # leaves a root-relative path that silently loses the drive.
+    assert f[0]["file"] == f"{root}/src/tax.py"
     assert f[0]["line"] == 4
 
 

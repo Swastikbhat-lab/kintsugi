@@ -265,6 +265,10 @@ test('strict parser reads a drive-letter path anchored inside the root', () => {
   const root = resolve(CWD).replace(/\\/g, '/');
   const f = parseStrict(`${root}/src/tax.py:4: F401 'os' imported but unused`, root, 'py:lint');
   assert.equal(f.length, 1);
+  // The finding must keep the drive letter — a regex that swallows `C:`
+  // into a non-capturing group leaves a win32 root-relative path that
+  // silently loses the drive (norm() would hide this, so assert raw).
+  assert.equal(f[0].file, `${root}/src/tax.py`);
   assert.equal(norm(f[0].file), '/repo/src/tax.py');
   assert.equal(f[0].line, 4);
 });
