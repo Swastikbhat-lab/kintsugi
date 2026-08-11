@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏺 Kintsugi
+#  Kintsugi
 
 **A self-healing repair loop for codebases — packaged as a Claude skill.**
 
