@@ -15,9 +15,17 @@
 }
 ```
 
-No config file? The engine derives defaults from the repo's own
-`package.json` scripts: `typecheck` (tsc parser) and `test` (tap parser), if
-they exist. Zero-config for an npm repo. The kintsugi repo itself ships a
+No config file? The engine detects the repo's toolchain and derives
+defaults, gating each on a quick availability probe so a repo never gets a
+check whose tool is missing:
+
+- **npm** — `typecheck` (tsc) + `test` (tap) from `package.json` scripts
+- **Python** — `py:test` (pytest `-q --tb=line`) + `py:lint` (ruff
+  `--output-format=concise`), venv-aware (`.venv`/`venv` preferred)
+- **Go** — `go:test` (`go test ./...`) + `go:vet` (`go vet ./...`)
+- **Mixed** repos get the union of their toolchains
+
+`--list-checks` prints what would run. The kintsugi repo itself ships a
 `kintsugi.config.json` pinning `--test-reporter=tap` so its own test check
 speaks TAP on every platform.
 
@@ -29,6 +37,7 @@ speaks TAP on every platform.
 | `tap` | Node test-runner TAP | `not ok 2 - applyTax applies the 10% tax rate` |
 | `spec` | Node test-runner spec output (`✔`/`✖`) | `✖ the loop repairs five defect classes (12774ms)` |
 | `lines` | one `path: message` (or bare `message`) per line | `README.md: version 0.1.0 does not match 0.2.0` |
+| `strict` | `path:line[:col]: message` only — bare lines are never findings | `src/foo.py:12:5: F401 'os' imported but unused` |
 
 A check that exits non-zero with no parseable finding is a **crash** — the
 loop reports it and never heals it. One exception is built in: if the

@@ -279,3 +279,55 @@ export function parseLines(output: string, cwd: string, check: string): Finding[
   }
   return findings;
 }
+
+// ------------------------------------------------------------- strict
+
+/**
+ * The zero-config contract for non-TS toolchains — pytest, go test, go vet,
+ * ruff. Every finding must be anchored to a `file:line` inside the source
+ * root; unlike `lines`, a bare line is never a finding. A `--- FAIL:`
+ * heading, a `1 failed in 0.12s` footer, a `=== RUN` banner: harness noise,
+ * not a defect.
+ *
+ * Shapes read:
+ *
+ *   pytest --tb=short   test_pricing.py:7: AssertionError
+ *   ruff                 src/foo.py:12:5: F401 'os' imported but unused
+ *   go test              foo_test.go:25: expected 10, got 5
+ *   go vet               ./foo.go:12:2: fmt.Println is unused
+ */
+export function parseStrict(output: string, cwd: string, check: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = output.split('\n');
+  // Optional drive letter, then a path token, then `:line`, optional `:col`,
+  // then the message. The path must look like a file (an extension or a
+  // separator) and never contain whitespace, so `FAIL	example.com/x	0.02s`
+  // and `1 failed in 0.12s` cannot become phantom findings.
+  const re = /^\s*(?:(?:[A-Za-z]:)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
+  for (let i = 0; i < lines.length; i++) {
+    // Trim CR/LF and padding: tool output on Windows is CRLF, and a trailing
+    // `\r` defeats the `$` anchor (it is a line terminator).
+    const m = lines[i].trim().match(re);
+    if (!m) continue;
+    const head = m[1];
+    if (!(/\.\w+$/.test(head) || /[\\/]/.test(head))) continue;
+    const file = normalizePath(head, cwd);
+    if (!file) continue;
+    const line = Number(m[2]);
+    const col = m[3] ? Number(m[3]) : undefined;
+    const message = m[4].trim();
+    // A traceback frame (`test_x.py:7: in test_tax_rate`) is scaffolding;
+    // the error line that follows it carries the defect.
+    if (/^in [\w.]+$/.test(message)) continue;
+    findings.push({
+      fingerprint: fingerprint(check, file, '', message),
+      check,
+      severity: 'minor',
+      summary: message,
+      file,
+      line,
+      evidence: { message, ...(col !== undefined ? { col } : {}) },
+    });
+  }
+  return findings;
+}

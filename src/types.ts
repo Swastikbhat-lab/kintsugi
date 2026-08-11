@@ -81,7 +81,7 @@ export interface Attempt {
 // ------------------------------------------------------------- checks
 
 /** How a check's output is turned into findings. */
-export type ParserKind = 'tsc' | 'tap' | 'lines';
+export type ParserKind = 'tsc' | 'tap' | 'lines' | 'strict';
 
 export interface CheckDef {
   name: string;

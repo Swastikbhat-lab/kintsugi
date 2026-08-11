@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { CheckDef, CheckResult } from './types.js';
-import { parseTsc, parseTap, parseLines, parseSpec } from './parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec, parseStrict } from './parsers.js';
 
 /**
  * Run one check command and turn its output into findings.
@@ -61,10 +61,13 @@ export function runCheck(
       const parsed = code === 0 ? [] : parseWithFallback(def, output, cwd);
       // A check owns its defect class: tsc-based lint only keeps the codes
       // it was configured for, so the same type error is not reported twice
-      // by two checks and repaired (or quarantined) twice.
-      const findings = def.filterCodes?.length
+      // by two checks and repaired (or quarantined) twice. A configured
+      // severity overrides the parser's default — the config says what a
+      // check means.
+      const findings = (def.filterCodes?.length
         ? parsed.filter((f) => def.filterCodes!.includes(f.code ?? ''))
-        : parsed;
+        : parsed)
+        .map((f) => (def.severity ? { ...f, severity: def.severity } : f));
       resolvePromise({
         check: def.name,
         findings,
@@ -82,6 +85,7 @@ function parse(def: CheckDef, output: string, cwd: string) {
     case 'tsc': return parseTsc(output, cwd, def.name);
     case 'tap': return parseTap(output, cwd, def.name);
     case 'lines': return parseLines(output, cwd, def.name);
+    case 'strict': return parseStrict(output, cwd, def.name);
     default: return [];
   }
 }

@@ -30,7 +30,7 @@ const sourceRoot = resolve(args.get('source') ?? '.');
 // An explicit --config is resolved against where the command was run; the
 // default (no flag) stays <source>/kintsugi.config.json.
 const configPath = args.get('config') ? resolve(args.get('config')!) : undefined;
-const loaded = loadConfig(sourceRoot, configPath);
+const loaded = await loadConfig(sourceRoot, configPath);
 
 let checks = loaded.checks;
 if (args.has('checks')) {
@@ -47,8 +47,10 @@ if (args.has('list-checks')) {
 
 if (checks.length === 0) {
   console.error(
-    'No checks configured. Write a kintsugi.config.json in the target repo, or\n' +
-    'pass --checks <a,b,c>.\n\n' +
+    'No checks discovered. Without a kintsugi.config.json the engine detects the\n' +
+    'repo\'s toolchain: npm (typecheck + test scripts), Python (pytest + ruff,\n' +
+    'venv-aware), Go (go test + go vet). Nothing matched — write a\n' +
+    'kintsugi.config.json in the target repo, or pass --checks <a,b,c>.\n\n' +
     'Usage: npm run cli -- --source <repo> [options]\n' +
     '\n' +
     '  --config <path>      config file (default <source>/kintsugi.config.json)\n' +

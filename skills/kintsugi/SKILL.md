@@ -53,6 +53,24 @@ Against a real repo with failing checks, the five phases are:
 5. **settle** — stop when nothing actionable is left, or the budget is
    spent. Quarantine the rest for a human, with the evidence attached.
 
+## What it covers out of the box
+
+Zero config means the engine detects the repo's toolchain and runs what its
+own scripts offer — no config file needed for the common cases:
+
+- **npm** — `typecheck` + `test` from `package.json` scripts
+- **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
+  (`.venv`/`venv` preferred over the system interpreter)
+- **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
+- **Mixed** repos get the union of their toolchains
+
+Every toolchain check is gated on a quick availability probe, so a repo
+never gets a check whose tool is missing. `--list-checks` prints what would
+run. The repair rules are TypeScript-shaped today; findings from other
+languages are surfaced as typed, file-anchored observations and quarantined
+with evidence when no rule reaches (or repaired by a model, if one is
+configured).
+
 ## Invariants (do not break these)
 
 - **Verify is the gate.** Never ship a repair you did not re-run the checks

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { parseTsc, parseTap, parseLines, parseSpec } from '../src/parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec, parseStrict } from '../src/parsers.js';
 
 const CWD = '/repo';
 
@@ -143,6 +143,93 @@ test('lines parser separates file-prefixed lines from plain messages', () => {
   assert.ok(f[0].summary.includes('0.1.0'));
   assert.equal(f[1].file, undefined);
   assert.ok(f[1].summary.includes('release channel'));
+});
+
+test('strict parser reads a pytest --tb=line failure', () => {
+  // `pytest -q --tb=line` emits `path:line: message` per failure — the
+  // message is already on the finding line, so no further enrichment.
+  const out = [
+    '_____________________________ test_tax_rate ______________________________',
+    '',
+    'E   assert 8 == 10',
+    '    +  where 8 = apply_tax(100)',
+    'test_pricing.py:7: assert 8 == 10',
+    '=========================== short test summary info ===========================',
+    'FAILED test_pricing.py::test_tax_rate - assert 8 == 10',
+    '1 failed, 1 passed in 0.05s',
+  ].join('\n');
+  const f = parseStrict(out, CWD, 'py:test');
+
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/test_pricing.py');
+  assert.equal(f[0].line, 7);
+  assert.equal(f[0].summary, 'assert 8 == 10');
+});
+
+test('strict parser reads a go test failure and skips FAIL banners', () => {
+  const out = [
+    '--- FAIL: TestTaxRate (0.00s)',
+    '    pricing_test.go:25: expected 10, got 5',
+    'FAIL',
+    'FAIL\texample.com/tax\t0.023s',
+  ].join('\n');
+  const f = parseStrict(out, CWD, 'go:test');
+
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/pricing_test.go');
+  assert.equal(f[0].line, 25);
+  assert.equal(f[0].summary, 'expected 10, got 5');
+});
+
+test('strict parser skips traceback frames and footers', () => {
+  // A `--tb=short`-style frame is scaffolding; only the real error line
+  // becomes a finding. Footers are never findings.
+  const out = [
+    'test_pricing.py:7: in test_tax_rate',
+    'E   assert 8 == 10',
+    '',
+    'test_pricing.py:7: AssertionError',
+    '1 failed in 0.05s',
+  ].join('\n');
+  const f = parseStrict(out, CWD, 'py:test');
+
+  assert.equal(f.length, 1);
+  assert.equal(f[0].summary, 'AssertionError');
+});
+
+test('strict parser reads ruff concise and go vet with column numbers', () => {
+  const ruff = parseStrict("src/foo.py:12:5: F401 [*] 'os' imported but unused", CWD, 'py:lint');
+  assert.equal(ruff.length, 1);
+  assert.equal(norm(ruff[0].file), '/repo/src/foo.py');
+  assert.equal(ruff[0].line, 12);
+  assert.equal(ruff[0].evidence.col, 5);
+  assert.equal(ruff[0].summary, "F401 [*] 'os' imported but unused");
+
+  const vet = parseStrict('./foo.go:12:2: fmt.Println is unused', CWD, 'go:vet');
+  assert.equal(vet.length, 1);
+  assert.equal(norm(vet[0].file), '/repo/foo.go');
+  assert.equal(vet[0].line, 12);
+  assert.equal(vet[0].evidence.col, 2);
+});
+
+test('strict parser drops outside-root paths and non-file noise', () => {
+  const out = [
+    'C:/Users/me/AppData/Local/site-packages/foo.py:12: boom',
+    '=== RUN   TestFoo',
+    'ok  example.com/tax  0.023s',
+  ].join('\n');
+  assert.equal(parseStrict(out, CWD, 'go:test').length, 0);
+});
+
+test('strict parser reads a drive-letter path anchored inside the root', () => {
+  // The drive-letter spelling is a Windows shape; on POSIX the same content
+  // is plain `/repo/…`. Deriving both from resolve(CWD) keeps the assertion
+  // valid on every OS (the convention the tap location test uses).
+  const root = resolve(CWD).replace(/\\/g, '/');
+  const f = parseStrict(`${root}/src/tax.py:4: F401 'os' imported but unused`, root, 'py:lint');
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/src/tax.py');
+  assert.equal(f[0].line, 4);
 });
 
 test('fingerprints are stable across numbers but differ by defect', () => {

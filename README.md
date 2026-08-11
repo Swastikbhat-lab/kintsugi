@@ -85,8 +85,19 @@ tokens of frontmatter until a failing check triggers it.
 ## Any check becomes an observation
 
 The contract with a check is one sentence: **give me typed failures**. A
-`kintsugi.config.json` in the target repo wires checks — with zero config,
-the engine just runs the repo's own `typecheck` and `test` scripts:
+`kintsugi.config.json` in the target repo wires checks. With zero config the
+engine detects the repo's toolchain and runs what its own scripts offer:
+
+- **npm** — `typecheck` + `test` from `package.json` scripts
+- **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
+- **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
+- **Mixed** repos get the union of their toolchains
+
+Every toolchain check is gated on a quick availability probe, so a repo
+never gets a check whose tool is missing — a default check that crashes on
+arrival would be a broken harness, not a defect. `--list-checks` shows what
+would run. A repo with no detected toolchain, or one that needs something
+specific, writes a config:
 
 ```jsonc
 {
