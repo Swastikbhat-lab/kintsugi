@@ -1,0 +1,14 @@
+[
+  {
+    "match": { "check": "py:test", "contains": "assert 100 == 10" },
+    "usage": { "inputTokens": 1500, "outputTokens": 700 },
+    "candidates": [
+      {
+        "file": "src/tax.py",
+        "find": "    return amount  # BUG: rate is ignored \u2014 100.0 != 10.0",
+        "replace": "    return amount * rate  # fixed: rate is applied",
+        "rationale": "rate 0.1 makes apply_tax(100) == 10"
+      }
+    ]
+  }
+]

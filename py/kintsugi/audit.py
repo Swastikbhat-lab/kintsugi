@@ -65,7 +65,6 @@ def audit_trace(client, trace_id: str) -> dict:
         obs = client.api.observations.get_many(
             trace_id=trace_id,
             limit=1000,
-            fields="core,basic,usage",
         )
     except Exception:
         return {"status": "error", "message": "failed to query Langfuse observations"}

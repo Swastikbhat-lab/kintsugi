@@ -208,8 +208,9 @@ remembers — and quarantines the sixth. The evidence from a real run is in
   code, deprecations) is one more arm in `src/propose.ts`.
 - **A live model run** — the Anthropic seam is built and degrades safely,
   but is only exercised through the mock so far.
-- **Langfuse traces end-to-end** — the tracer is wired and inert without
-  keys; a live dashboard needs a project with `LANGFUSE_*` env set.
+- **A live Langfuse dashboard** — the tracer is proven end-to-end against
+  the local mock (`demo/langfuse_mock.py`) with real SDK calls, usage, and
+  audit; the only remaining gap is pointing it at a real project.
 
 ## Observability
 
@@ -231,6 +232,29 @@ history by fingerprint, and prints a per-finding cost table
 (fingerprint, finding, outcome, input/output tokens, cost) plus a total.
 Multiple model calls for one finding accumulate into its row, and the
 same prices used at trace time produce the same costs.
+
+**The SDK version matters — get this right or tracing silently no-ops.**
+The tracer and the audit module each speak one specific `langfuse` API,
+and *no single current release has both*: newer releases (3.x/4.x on
+PyPI, `@langfuse/client` 5.x) dropped the tracer's
+`trace/span/generation` methods, and the 2.x line lacks the audit's
+`fields` query parameter. Pin the versions the code was built against:
+
+- **Python engine**: `pip install 'langfuse~=2.60'` (or
+  `pip install 'kintsugi-py[tracing]'`). Installing today's `langfuse`
+  (4.x) makes the tracer silently inert — it would look like tracing
+  works and post nothing.
+- **TS engine**: both `langfuse` (≥3.38, the tracer) and
+  `@langfuse/client` (≥5, the audit) are declared in `package.json`.
+
+**Prove it locally without a Langfuse account** — `demo/langfuse_mock.py`
+serves the two endpoints the SDKs actually call
+(`POST /api/public/ingestion`, `GET /api/public/observations`), so the
+real SDK posts real traces to it and the `--trace` audit reads them
+back. Run it (`python demo/langfuse_mock.py 8787`), point the loop at it
+(`LANGFUSE_HOST=http://127.0.0.1:8787`), and open
+`http://127.0.0.1:8787/?trace=<id>` for a rendered viewer of the
+ledger-joined trace.
 
 **Audit locally, no service needed** — `kintsugi --audit-log <path>`
 appends one NDJSON line per repair attempt (fingerprint, outcome,

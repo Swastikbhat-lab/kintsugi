@@ -124,6 +124,12 @@ and the derived cost, and a span per verify. Without keys, or without the
 `langfuse` SDK installed, the tracer is inert: telemetry can never take the
 repair loop down.
 
+**Version pin required** — the Python engine needs `langfuse~=2.60`
+(`pip install 'kintsugi-py[tracing]'`): newer 3.x/4.x releases removed
+`client.trace/span/generation`, which would silently disable tracing.
+The TS engine's `package.json` already declares `langfuse` and
+`@langfuse/client` at working versions.
+
 ## Ledger
 
 Lives in `~/.kintsugi/ledgers/<hash>.json`, keyed by source root — never

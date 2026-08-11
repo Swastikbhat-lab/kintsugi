@@ -92,7 +92,7 @@ def main(argv=None):
         client = create_audit_client()
         if client is None:
             print("kintsugi: auditing needs LANGFUSE_PUBLIC_KEY/SECRET_KEY and the "
-                  "langfuse SDK (pip install langfuse)", file=sys.stderr)
+                  "langfuse SDK (pip install 'langfuse~=2.60')", file=sys.stderr)
             return 2
         print(print_audit(audit_trace(client, args["trace"]), cost_usd))
         return 0

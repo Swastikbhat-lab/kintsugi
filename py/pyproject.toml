@@ -5,5 +5,12 @@ description = "Kintsugi Python engine: check runner + repair rules with no Node 
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+# Langfuse tracing + audit. Pinned to the 2.x line: the tracer and the
+# audit module both speak its API (client.trace/span/generation and
+# client.api.observations.get_many). Newer langfuse releases (3.x/4.x)
+# removed those methods, which would silently disable tracing.
+tracing = ["langfuse~=2.60"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
