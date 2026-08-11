@@ -21,7 +21,7 @@ from .fingerprint import fingerprint
 SKIP = re.compile(
     r"(^|[\\/])(node_modules|dist|build|\.git|\.venv|venv|site-packages|"
     r"dist-packages|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|"
-    r"\.tox)([\\/]|$)"
+    r"\.tox|target)([\\/]|$)"
 )
 
 _DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -175,4 +175,123 @@ def parse_lines(output: str, cwd: str, check: str):
             "line": line_no,
             "evidence": {"message": message},
         })
+    return findings
+
+# ------------------------------------------------------------- rust
+
+_PANIC = re.compile(r"panicked at\s+([^:\s]+):(\d+)(?::(\d+))?:?\s*(.*)$")
+_DIAG = re.compile(r"^(?:warning|error(?:\[[A-Z]+\d+\])?):\s*(.+)$")
+_LOC = re.compile(r"^\s*-->\s+([^:\s]+):(\d+)(?::(\d+))?\s*$")
+_ERR = re.compile(r"^error(?:\s*\[([A-Z]+\d+)\])?:\s*(.*)$")
+_WARN = re.compile(r"^warning:\s*(.*)$")
+_UNUSED_IMPORT = re.compile(r"^unused import:")
+
+
+def _rust_diagnostic(line: str):
+    """Lift a machine code and the bare message out of a rust diagnostic
+    line. `error[E0425]:` carries a real code; `error:` is a denied lint
+    (clippy `-D warnings`), so a lint-shaped message still gets its code."""
+    err = _ERR.match(line)
+    if err:
+        code = err.group(1)
+        text = err.group(2)
+        return {"code": code or ("unused_imports" if _UNUSED_IMPORT.match(text) else None), "text": text}
+    warn = _WARN.match(line)
+    if warn:
+        text = warn.group(1)
+        return {"code": "unused_imports" if _UNUSED_IMPORT.match(text) else None, "text": text}
+    return {"code": None, "text": line}
+
+
+def parse_rust(output: str, cwd: str, check: str):
+    """Rust toolchain output — cargo test panics and rustc/clippy
+    diagnostics, in the default text format and `--message-format=short`.
+
+    cargo test embeds the panic location in the frame line rather than on
+    its own:
+
+      thread 'tests::test_applies_tax' panicked at src/lib.rs:8:5:
+      assertion `left == right` failed
+        left: 8.0
+        right: 10
+
+    rustc and clippy default to a *paired* format — a message line, then
+    the `--> path:line[:col]` location line:
+
+      warning: unused import: `std::fmt`
+        --> src/lib.rs:2:5
+
+    …which this parser joins into one finding. The short format is one line
+    per diagnostic and parses like strict.
+    """
+    findings = []
+    lines = output.split("\n")
+
+    def push(head, line_no, col, diag):
+        file = normalize_path(head, cwd)
+        if not file:
+            return
+        info = _rust_diagnostic(diag)
+        code = info["code"]
+        text = info["text"]
+        evidence = {"message": text}
+        if col is not None:
+            evidence["col"] = col
+        if code:
+            evidence["code"] = code
+        findings.append({
+            "fingerprint": fingerprint(check, file, code or "", text),
+            "check": check,
+            "severity": "minor",
+            "summary": text,
+            "file": file,
+            "line": line_no,
+            "code": code,
+            "evidence": evidence,
+        })
+
+    # Pass 1 — panic frames. The panic message is the next non-empty line;
+    # the `left:`/`right:` value lines after it are not the message.
+    for i, raw in enumerate(lines):
+        m = _PANIC.search(raw)
+        if not m:
+            continue
+        message = m.group(4).strip()
+        if not message:
+            nxt = next((l for l in lines[i + 1:] if l.strip()), "")
+            if nxt and not re.match(r"^\s*left:", nxt):
+                message = nxt.strip()
+        if not message:
+            continue
+        push(m.group(1), int(m.group(2)), int(m.group(3)) if m.group(3) else None, message)
+
+    # Pass 2 — paired diagnostics: a message line, then the `-->` location
+    # line within the same block (a blank line between them is legal).
+    for i, raw in enumerate(lines):
+        m = _DIAG.match(raw)
+        if not m:
+            continue
+        for j in range(i + 1, min(i + 8, len(lines))):
+            loc = _LOC.match(lines[j])
+            if loc:
+                push(loc.group(1), int(loc.group(2)), int(loc.group(3)) if loc.group(3) else None, raw)
+                break
+            t = lines[j].strip()
+            if j > i + 1 and t and re.match(r"^(?:warning|error|note|help)", t):
+                break
+
+    # Pass 3 — strict-style anchored lines (clippy/rustc short format, and
+    # any other `path:line: message` cargo emits).
+    for raw in lines:
+        m = _STRICT_RE.match(raw.strip())
+        if not m:
+            continue
+        head = m.group(1)
+        if not _FILEISH.search(head):
+            continue
+        message = m.group(4).strip()
+        if not message:
+            continue
+        push(head, int(m.group(2)), int(m.group(3)) if m.group(3) else None, message)
+
     return findings

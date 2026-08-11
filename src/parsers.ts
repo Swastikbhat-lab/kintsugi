@@ -17,7 +17,7 @@ import { fingerprint } from './fingerprint.js';
 // directory `venv`, but for a repair tool the cost of skipping beats the
 // cost of healing site-packages.
 const SKIP =
-  /(^|[\\/])(node_modules|dist|build|\.git|\.venv|venv|site-packages|dist-packages|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox)([\\/]|$)/;
+  /(^|[\\/])(node_modules|dist|build|\.git|\.venv|venv|site-packages|dist-packages|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|target)([\\/]|$)/;
 
 /**
  * Normalize a reported path against the source root; drop anything outside.
@@ -346,4 +346,122 @@ export function parseStrict(output: string, cwd: string, check: string): Finding
     });
   }
   return findings;
+}
+
+// ------------------------------------------------------------- rust
+
+/**
+ * Rust toolchain output — cargo test panics and rustc/clippy diagnostics,
+ * in the default text format and `--message-format=short`.
+ *
+ * cargo test embeds the panic location in the frame line rather than on its
+ * own line:
+ *
+ *   thread 'tests::test_applies_tax' panicked at src/lib.rs:8:5:
+ *   assertion `left == right` failed
+ *     left: 8.0
+ *     right: 10
+ *
+ * The `panicked at file:line:col` anchor is the finding's location (the
+ * assert! line); the panic message is the line that follows. rustc and
+ * clippy default to a *paired* format — a message line, then a location
+ * line:
+ *
+ *   warning: unused import: `std::fmt`
+ *     --> src/lib.rs:2:5
+ *
+ * …which this parser joins into one finding. (With `-D warnings` the same
+ * diagnostic prints as `error: …`.) The short format is already one line
+ * per diagnostic (`src/lib.rs:2:5: warning: unused import: …`) and parses
+ * like strict. `left:`/`right:` value lines, `note:` hints, `= help:`
+ * suggestions and the summary footer are harness noise.
+ */
+export function parseRust(output: string, cwd: string, check: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = output.split('\n');
+
+  const push = (head: string, line: number, col: number | undefined, diag: string) => {
+    const file = normalizePath(head, cwd);
+    if (!file) return;
+    const { code, text } = rustDiagnostic(diag);
+    findings.push({
+      fingerprint: fingerprint(check, file, code ?? '', text),
+      check,
+      severity: 'minor',
+      summary: text,
+      file,
+      line,
+      code,
+      evidence: { message: text, ...(col !== undefined ? { col } : {}), ...(code ? { code } : {}) },
+    });
+  };
+
+  // Pass 1 — panic frames. A trailing `:` with no message means the panic
+  // message (e.g. `assertion `left == right` failed`) is the next non-empty
+  // line; the `left:`/`right:` value lines that follow it are not the
+  // message.
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/panicked at\s+([^:\s]+):(\d+)(?::(\d+))?:?\s*(.*)$/);
+    if (!m) continue;
+    let message = m[4].trim();
+    if (!message) {
+      const next = lines.slice(i + 1).find((l) => l.trim() !== '');
+      if (next && !/^\s*left:/.test(next)) message = next.trim();
+    }
+    if (!message) continue;
+    push(m[1], Number(m[2]), m[3] ? Number(m[3]) : undefined, message);
+  }
+
+  // Pass 2 — paired rustc/clippy diagnostics: a `warning:` / `error…:`
+  // message line, then the `--> file:line[:col]` location line within the
+  // same block (a blank line between them is legal).
+  const diagRe = /^(?:warning|error(?:\[[A-Z]+\d+\])?):\s*(.+)$/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(diagRe);
+    if (!m) continue;
+    for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+      const loc = lines[j].match(/^\s*-->\s+([^:\s]+):(\d+)(?::(\d+))?\s*$/);
+      if (loc) {
+        push(loc[1], Number(loc[2]), loc[3] ? Number(loc[3]) : undefined, lines[i]);
+        break;
+      }
+      // Another diagnostic or a `= help` note ends the hunt for this one.
+      const t = lines[j].trim();
+      if (j > i + 1 && t !== '' && /^(?:warning|error|note|help)/.test(t)) break;
+    }
+  }
+
+  // Pass 3 — strict-style anchored lines: clippy/rustc `--message-format=
+  // short` prints `path:line:col: warning|error…: message`, and cargo can
+  // emit other `path:line: message` shapes.
+  const re = /^\s*(?:(?:[A-Za-z]:)?([^:\s]+):(\d+)(?::(\d+))?:\s*(.*))$/;
+  for (const raw of lines) {
+    const m = raw.trim().match(re);
+    if (!m) continue;
+    const head = m[1];
+    if (!(/\.\w+$/.test(head) || /[\\/]/.test(head))) continue;
+    const message = m[4].trim();
+    if (!message) continue;
+    push(head, Number(m[2]), m[3] ? Number(m[3]) : undefined, message);
+  }
+
+  return findings;
+}
+
+/** Lift a machine code and the bare message out of a rust diagnostic line. */
+function rustDiagnostic(line: string): { code?: string; text: string } {
+  // `error[E0425]: …` carries a real code; `error: …` is a denied lint
+  // (clippy `-D warnings`), so a lint-shaped message still gets its code.
+  const err = line.match(/^error(?:\s*\[([A-Z]+\d+)\])?:\s*(.*)$/);
+  if (err) {
+    const code = err[1];
+    const text = err[2];
+    return { code: code ?? (/^unused import:/.test(text) ? 'unused_imports' : undefined), text };
+  }
+  const warn = line.match(/^warning:\s*(.*)$/);
+  if (warn) {
+    const text = warn[1];
+    return { code: /^unused import:/.test(text) ? 'unused_imports' : undefined, text };
+  }
+  return { text: line };
 }

@@ -12,8 +12,10 @@ import type { CheckDef } from './types.js';
  *   npm      — `typecheck` + `test` from its own package.json scripts
  *   python   — `py:test` (pytest) and `py:lint` (ruff), venv-aware
  *   go       — `go:test` (go test ./...) and `go:vet` (go vet ./...)
+ *   rust     — `rs:test` (cargo test) and `rs:lint` (cargo clippy)
  *
- * Detection is marker-first (package.json / pyproject.toml / go.mod …) and
+ * Detection is marker-first (package.json / pyproject.toml / go.mod /
+ * Cargo.toml …) and
  * every toolchain check is gated on a quick availability probe, so a repo
  * never gets a check whose tool is not installed — a default check that
  * crashes on arrival would be a broken harness, not a defect. Anything more
@@ -87,6 +89,7 @@ export async function defaultChecks(
   checks.push(...npmChecks(sourceRoot));
   checks.push(...await pythonChecks(sourceRoot, probe));
   checks.push(...await goChecks(sourceRoot, probe));
+  checks.push(...await rustChecks(sourceRoot, probe));
   return checks;
 }
 
@@ -168,5 +171,20 @@ async function goChecks(sourceRoot: string, probe: ToolProbe): Promise<CheckDef[
   return [
     { name: 'go:vet', command: 'go vet ./...', parser: 'strict', severity: 'major' },
     { name: 'go:test', command: 'go test ./...', parser: 'strict', severity: 'blocker' },
+  ];
+}
+
+// ------------------------------------------------------------- rust
+
+async function rustChecks(sourceRoot: string, probe: ToolProbe): Promise<CheckDef[]> {
+  if (!existsSync(resolve(sourceRoot, 'Cargo.toml'))) return [];
+  if (!await probe('cargo --version')) return [];
+  return [
+    // `-D warnings` is what makes clippy a *check*: without it the lints are
+    // advisory and clippy exits 0, so the loop would never see them. Cargo
+    // cold-builds the crate (and its deps) before testing or linting, so
+    // these checks get a longer timeout than the 120s default.
+    { name: 'rs:lint', command: 'cargo clippy -- -D warnings', parser: 'rust', severity: 'minor', timeoutMs: 300_000 },
+    { name: 'rs:test', command: 'cargo test --quiet', parser: 'rust', severity: 'blocker', timeoutMs: 300_000 },
   ];
 }

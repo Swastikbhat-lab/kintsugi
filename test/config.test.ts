@@ -75,6 +75,23 @@ test('go repo without the go toolchain gets nothing', async () => {
   assert.deepEqual(names(await defaultChecks(root, probe(false))), []);
 });
 
+test('rust repo: rs:lint via clippy and rs:test via cargo when the toolchain is present', async () => {
+  const root = makeRepo({ 'Cargo.toml': '[package]\nname = "tax"\nversion = "0.1.0"\n' });
+  const checks = await defaultChecks(root, probe(true));
+  assert.deepEqual(names(checks), ['rs:lint', 'rs:test']);
+  assert.equal(checks[0].parser, 'rust');
+  assert.equal(checks[0].severity, 'minor');
+  assert.ok(checks[0].command.includes('-D warnings'), checks[0].command);
+  assert.equal(checks[1].severity, 'blocker');
+  // cargo cold-builds the crate, so the checks carry a longer timeout.
+  assert.equal(checks[0].timeoutMs, 300_000);
+});
+
+test('rust repo without the cargo toolchain gets nothing', async () => {
+  const root = makeRepo({ 'Cargo.toml': '[package]\nname = "tax"\n' });
+  assert.deepEqual(names(await defaultChecks(root, probe(false))), []);
+});
+
 test('mixed npm + python repo gets the union of toolchains', async () => {
   const root = makeRepo({
     'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),

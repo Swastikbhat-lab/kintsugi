@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { parseTsc, parseTap, parseLines, parseSpec, parseStrict } from '../src/parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust } from '../src/parsers.js';
 
 const CWD = '/repo';
 
@@ -264,6 +264,101 @@ test('strict parser reads a drive-letter path anchored inside the root', () => {
   assert.equal(f.length, 1);
   assert.equal(norm(f[0].file), '/repo/src/tax.py');
   assert.equal(f[0].line, 4);
+});
+
+test('rust parser reads a cargo test panic frame', () => {
+  const out = [
+    'running 2 tests',
+    'test tests::test_applies_tax ... FAILED',
+    '',
+    'failures:',
+    '',
+    '---- tests::test_applies_tax stdout ----',
+    "thread 'tests::test_applies_tax' panicked at src/lib.rs:8:5:",
+    'assertion `left == right` failed',
+    '  left: 8.0,',
+    ' right: 10',
+    'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace',
+    '',
+    'failures:',
+    '    tests::test_applies_tax',
+    '',
+    'test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+  ].join('\n');
+  const f = parseRust(out, CWD, 'rs:test');
+
+  assert.equal(f.length, 1);
+  assert.equal(norm(f[0].file), '/repo/src/lib.rs');
+  assert.equal(f[0].line, 8);
+  assert.equal(f[0].summary, 'assertion `left == right` failed');
+});
+
+test('rust parser pairs clippy warnings with their --> location', () => {
+  const out = [
+    'warning: unused import: `std::fmt`',
+    ' --> src/lib.rs:2:5',
+    '  |',
+    '2 | use std::fmt;',
+    '  |     ^^^^^^^^^',
+    '  |',
+    '  = help: remove it',
+  ].join('\n');
+  const [f] = parseRust(out, CWD, 'rs:lint');
+
+  assert.equal(f.code, 'unused_imports');
+  assert.equal(norm(f.file), '/repo/src/lib.rs');
+  assert.equal(f.line, 2);
+  assert.equal(f.evidence.col, 5);
+  assert.ok(f.summary.includes('unused import'));
+});
+
+test('rust parser reads a denied lint (`-D warnings`) printed as error:', () => {
+  const out = [
+    'error: unused import: `std::fmt`',
+    ' --> src/lib.rs:1:5',
+    '  |',
+    '1 | use std::fmt;',
+    '  |     ^^^^^^^^^',
+  ].join('\n');
+  const [f] = parseRust(out, CWD, 'rs:lint');
+
+  assert.equal(f.code, 'unused_imports');
+  assert.equal(f.line, 1);
+});
+
+test('rust parser reads rustc compile errors in default format', () => {
+  const out = [
+    'error[E0425]: cannot find value `x` in this scope',
+    ' --> src/lib.rs:5:17',
+    '  |',
+    '5 |     let y = x;',
+    '  |             ^',
+  ].join('\n');
+  const [f] = parseRust(out, CWD, 'rs:test');
+
+  assert.equal(f.code, 'E0425');
+  assert.equal(norm(f.file), '/repo/src/lib.rs');
+  assert.equal(f.line, 5);
+});
+
+test('rust parser reads clippy short format (one line per diagnostic)', () => {
+  const out = 'src/lib.rs:2:5: warning: unused import: `std::fmt`';
+  const [f] = parseRust(out, CWD, 'rs:lint');
+
+  assert.equal(f.code, 'unused_imports');
+  assert.equal(norm(f.file), '/repo/src/lib.rs');
+  assert.equal(f.line, 2);
+});
+
+test('rust parser ignores value lines, notes and unanchored noise', () => {
+  const out = [
+    '  left: 8.0,',
+    ' right: 10',
+    'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace',
+    'test result: FAILED. 1 passed; 1 failed',
+    '  = help: remove it',
+  ].join('\n');
+  assert.equal(parseRust(out, CWD, 'rs:test').length, 0);
 });
 
 test('fingerprints are stable across numbers but differ by defect', () => {

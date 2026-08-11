@@ -11,7 +11,7 @@ import os
 import subprocess
 import time
 
-from .parsers import parse_lines, parse_strict
+from .parsers import parse_lines, parse_rust, parse_strict
 
 
 def _parse(defn, output: str, cwd: str):
@@ -20,13 +20,19 @@ def _parse(defn, output: str, cwd: str):
         return parse_strict(output, cwd, defn["name"])
     if parser == "lines":
         return parse_lines(output, cwd, defn["name"])
+    if parser == "rust":
+        return parse_rust(output, cwd, defn["name"])
     # tsc/tap/spec output shapes belong to the Node engine; a config that
     # declares them here is a config that cannot be read.
     return []
 
 
-def run_check(defn, cwd: str, timeout_ms: int = 120_000):
+def run_check(defn, cwd: str, timeout_ms: int | None = None):
     """Run one check command and return a CheckResult-shaped dict."""
+    if timeout_ms is None:
+        # A check can declare a longer timeout for cold-building
+        # toolchains (cargo compiles the crate before testing).
+        timeout_ms = defn.get("timeoutMs", 120_000)
     started = time.time()
     env = dict(os.environ)
     env.pop("NODE_TEST_CONTEXT", None)

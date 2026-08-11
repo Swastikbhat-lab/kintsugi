@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { CheckDef, CheckResult } from './types.js';
-import { parseTsc, parseTap, parseLines, parseSpec, parseStrict } from './parsers.js';
+import { parseTsc, parseTap, parseLines, parseSpec, parseStrict, parseRust } from './parsers.js';
 
 /**
  * Run one check command and turn its output into findings.
@@ -14,7 +14,7 @@ import { parseTsc, parseTap, parseLines, parseSpec, parseStrict } from './parser
 export function runCheck(
   def: CheckDef,
   cwd: string,
-  timeoutMs = 120_000,
+  timeoutMs = def.timeoutMs ?? 120_000,
 ): Promise<CheckResult> {
   return new Promise((resolvePromise) => {
     const started = Date.now();
@@ -86,6 +86,7 @@ function parse(def: CheckDef, output: string, cwd: string) {
     case 'tap': return parseTap(output, cwd, def.name);
     case 'lines': return parseLines(output, cwd, def.name);
     case 'strict': return parseStrict(output, cwd, def.name);
+    case 'rust': return parseRust(output, cwd, def.name);
     default: return [];
   }
 }

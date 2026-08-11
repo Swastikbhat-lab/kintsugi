@@ -98,6 +98,7 @@ engine detects the repo's toolchain and runs what its own scripts offer:
 - **npm** — `typecheck` + `test` from `package.json` scripts
 - **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
+- **Rust** — `rs:test` (`cargo test`) and `rs:lint` (`cargo clippy -D warnings`)
 - **Mixed** repos get the union of their toolchains
 
 **Two engines, one loop.** The full orchestrator is TypeScript (agent
@@ -139,9 +140,9 @@ that crashes with no output is a broken harness — reported, never healed.
 | Unresolvable import paths (TS) | point at the real module | rule |
 | Missing `export` keyword (TS) | add it (when the declaration exists) | rule |
 | Stale version strings (npm) | replace from package.json | rule |
-| Unused imports (Python `F401`, Go) | remove the import line | rule |
+| Unused imports (Python `F401`, Go, Rust `use`) | remove the import line | rule |
 | Unsorted import blocks (Python `I001`) | sort them isort-style | rule |
-| Wrong constant behind a failing assertion (Python/Go) | recompute from the assertion's own numbers | rule |
+| Wrong constant behind a failing assertion (Python/Go/Rust `assert_eq!`) | recompute from the assertion's own numbers | rule |
 | Wrong behaviour behind a failing test | rewrite the code | model, then **verified** |
 | Missing functions, missing features | — | quarantined with evidence |
 

@@ -81,7 +81,7 @@ export interface Attempt {
 // ------------------------------------------------------------- checks
 
 /** How a check's output is turned into findings. */
-export type ParserKind = 'tsc' | 'tap' | 'lines' | 'strict';
+export type ParserKind = 'tsc' | 'tap' | 'lines' | 'strict' | 'rust';
 
 export interface CheckDef {
   name: string;
@@ -93,6 +93,11 @@ export interface CheckDef {
   budget?: number;
   /** Only findings with these codes are kept — a check owns its defect class. */
   filterCodes?: string[];
+  /**
+   * Longer than the 120s default for toolchains that cold-build on first
+   * run (cargo compiles the crate and its deps before testing/linting).
+   */
+  timeoutMs?: number;
 }
 
 export interface CheckResult {

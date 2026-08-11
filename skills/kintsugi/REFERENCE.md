@@ -23,6 +23,8 @@ check whose tool is missing:
 - **Python** — `py:test` (pytest `-q --tb=line`) + `py:lint` (ruff
   `--output-format=concise`), venv-aware (`.venv`/`venv` preferred)
 - **Go** — `go:test` (`go test ./...`) + `go:vet` (`go vet ./...`)
+- **Rust** — `rs:test` (`cargo test --quiet`) + `rs:lint` (`cargo clippy
+  -- -D warnings`), each with a 300s timeout for cargo's cold builds
 - **Mixed** repos get the union of their toolchains
 
 `--list-checks` prints what would run. The kintsugi repo itself ships a
@@ -38,12 +40,13 @@ speaks TAP on every platform.
 | `spec` | Node test-runner spec output (`✔`/`✖`) | `✖ the loop repairs five defect classes (12774ms)` |
 | `lines` | one `path: message` (or bare `message`) per line | `README.md: version 0.1.0 does not match 0.2.0` |
 | `strict` | `path:line[:col]: message` only — bare lines are never findings | `src/foo.py:12:5: F401 'os' imported but unused` |
+| `rust` | cargo test panic frames (`panicked at path:line:col:`), paired `warning:`/`error…:` + `--> path:line:col` diagnostics, and short-format lines | `warning: unused import: \`std::fmt\`` + `--> src/lib.rs:2:5` |
 
-`strict` is defensive beyond the shape: paths under `node_modules`, `dist`,
-`build`, `.git`, virtualenvs (`.venv`/`venv`/`site-packages`) and Python
-caches are never findings, and pytest `warnings summary` lines
-(`path:line: XxxWarning: …`) are ignored — a noisy suite must not surface
-phantom defects.
+`strict` (and `rust`) are defensive beyond the shape: paths under
+`node_modules`, `dist`, `build`, `.git`, `target` (cargo's build dir),
+virtualenvs (`.venv`/`venv`/`site-packages`) and Python caches are never
+findings, and pytest `warnings summary` lines (`path:line: XxxWarning: …`)
+are ignored — a noisy suite must not surface phantom defects.
 
 **Two engines, one loop.** The TypeScript engine (`src/`) is the full
 orchestrator; the Python engine (`py/`, `python -m kintsugi` from `py/`) is

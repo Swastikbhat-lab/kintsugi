@@ -9,7 +9,8 @@ and a ledger entry to prove it.
 
 This is a faithful port of the TypeScript engine's Python and Go rules:
 F401 (unused import), I001 (import-block sorting), the assertion-revealed
-constant fix (pytest / testify / if-got shapes), and Go's unused import.
+constant fix (pytest / testify / if-got / assert_eq! shapes), Rust's
+unused `use` import, and Go's unused import.
 TS rules (TS6133, TS2307, …) stay with the Node engine.
 """
 
@@ -33,7 +34,7 @@ _STDLIB = {
     "xml", "zipfile", "zoneinfo",
 }
 
-_SKIP = re.compile(r"(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)")
+_SKIP = re.compile(r"(^|[\\/])(node_modules|dist|build|\.git|target)([\\/]|$)")
 _IMPORT_LINE = re.compile(r"^(?:import\s+|from\s+\S+\s+import\s+)")
 _IMPORT_SPEC = re.compile(r"^(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))")
 
@@ -67,6 +68,8 @@ def propose_patches(finding: dict, source_root: str):
         return unused_python_import_patches(finding, source_root)
     if code == "I001":
         return unsorted_import_block_patches(finding, source_root)
+    if code == "unused_imports":
+        return unused_rust_import_patches(finding, source_root)
 
     check = finding["check"]
     message = f"{finding['summary']} {finding.get('evidence', {}).get('message', '')}"
@@ -76,6 +79,8 @@ def propose_patches(finding: dict, source_root: str):
         if re.search(r"imported and not used", message):
             return unused_go_import_patches(finding, source_root)
         return assertion_constant_patches(finding, source_root, "go")
+    if check == "rs:test":
+        return assertion_constant_patches(finding, source_root, "rust")
     return []
 
 
@@ -266,6 +271,38 @@ def unused_go_import_patches(finding: dict, source_root: str):
     return remove_line_patch(file, text, idx, f"'{path}' is imported but not used — removing the import.")
 
 
+
+# -------------------------------------------------------------- unused import (rust)
+
+def unused_rust_import_patches(finding: dict, source_root: str):
+    """Unused `use` import (clippy `unused_imports`). Whole-line imports —
+    `use std::fmt;`, optionally aliased — are removed outright, collapsing a
+    surrounding blank line exactly like the Python rule. Group imports
+    (`use a::{b, c};`) are left for a human: clippy names only the last
+    segment, which cannot be re-anchored safely."""
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    message = f"{finding['summary']} {finding.get('evidence', {}).get('message', '')}"
+    m = re.search(r"`([^`]+)`", message)
+    if not m:
+        return []
+    path = m.group(1)
+    text = _read(file)
+    lines = text.split("\n")
+    idx = line - 1
+    if idx < 0 or idx >= len(lines):
+        return []
+    line_text = lines[idx]
+    if not re.match(r"^\s*use\s+", line_text):
+        return []
+    whole = re.compile(r"^\s*use\s+" + _esc(path) + r"(?:\s+as\s+\w+)?\s*;\s*$")
+    if not whole.match(line_text):
+        return []
+    return remove_line_patch(file, text, idx, f"'{path}' is imported but never used — removing the use.")
+
+
 # -------------------------------------------------------------- assertion → constant
 
 def assertion_constant_patches(finding: dict, source_root: str, lang: str):
@@ -288,7 +325,9 @@ def assertion_constant_patches(finding: dict, source_root: str, lang: str):
     impl = find_function_body(parsed["fn"], source_root, lang)
     if not impl:
         return []
-    re_ = re.compile(rf"\b{_esc(impl['param'])}\s*\*\s*(\d+(?:\.\d+)?)\b")
+    # Rust floats can carry a type suffix (`0.08_f64`); the others cannot.
+    num = r"\d+(?:\.\d+)?(?:_?f(?:32|64))?" if lang == "rust" else r"\d+(?:\.\d+)?"
+    re_ = re.compile(rf"\b{_esc(impl['param'])}\s*\*\s*({num})\b")
     m = re_.search(impl["body"])
     if not m:
         return []
@@ -306,12 +345,15 @@ def assertion_constant_patches(finding: dict, source_root: str, lang: str):
     # is float noise, not a constant.
     if not re.match(r"^\d+\.?\d*$", literal) or len(literal) > 10:
         return []
-    if literal == m.group(1):
+    # Compare against the numeric part so a redundant `0.08_f64` -> `0.08`
+    # rewrite (which changes nothing) is never proposed.
+    num_part = re.sub(r"(?:_?f(?:32|64))$", "", m.group(1))
+    if literal == num_part:
         return []
 
     find = m.group(0)
-    replace = re.sub(r"\d+(?:\.\d+)?$", literal, find)
-    current = float(m.group(1)) * arg
+    replace = re.sub(r"\d+(?:\.\d+)?(?:_?f(?:32|64))?$", literal, find)
+    current = float(num_part) * arg
     rationale = (
         f"The test asserts {parsed['fn']}({parsed['arg']}) == {parsed['expected']}; "
         f"the constant '{impl['param']} * {m.group(1)}' makes it "
@@ -332,6 +374,15 @@ def parse_assertion(line: str, lang: str):
         if mirror:
             return {"fn": mirror.group(2), "arg": mirror.group(3), "expected": mirror.group(1)}
         return None
+    if lang == "rust":
+        # `assert_eq!(f(n), want)` and the mirror `assert_eq!(want, f(n))`.
+        call = re.search(r"assert_eq!\s*\(\s*(\w+)\s*\(\s*([\d.]+)\s*\)\s*,\s*([\d.]+)", line)
+        if call:
+            return {"fn": call.group(1), "arg": call.group(2), "expected": call.group(3)}
+        mirror = re.search(r"assert_eq!\s*\(\s*([\d.]+)\s*,\s*(\w+)\s*\(\s*([\d.]+)\s*\)", line)
+        if mirror:
+            return {"fn": mirror.group(2), "arg": mirror.group(3), "expected": mirror.group(1)}
+        return None
     # Go: testify Equal(t, want, got) and the plain `if got := f(n); got != want`.
     eq = re.search(r"\.Equal\(\s*t,\s*([\d.]+),\s*(\w+)\s*\(\s*([\d.]+)\s*\)", line)
     if eq:
@@ -344,15 +395,19 @@ def parse_assertion(line: str, lang: str):
 
 def find_function_body(fn: str, source_root: str, lang: str):
     """The function's source file, text, body, and first parameter name."""
-    ext = "py" if lang == "python" else "go"
+    ext = "py" if lang == "python" else ("go" if lang == "go" else "rs")
     if lang == "python":
         sig_re = re.compile(rf"def\s+{_esc(fn)}\s*\(([^)]*)\)")
         param_re = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^,)]+)?(?:,|$)")
         test_file = re.compile(r"(?:^|[/\\])(?:test_|_test)\.py$")
-    else:
+    elif lang == "go":
         sig_re = re.compile(rf"func\s+{_esc(fn)}\s*\(([^)]*)\)")
         param_re = re.compile(r"^\s*([A-Za-z_]\w*)\s+[^,)]+(?:,|$)")
         test_file = re.compile(r"\._test\.go$")
+    else:
+        sig_re = re.compile(rf"fn\s+{_esc(fn)}\s*\(([^)]*)\)")
+        param_re = re.compile(r"^\s*([A-Za-z_]\w*)\s*:")
+        test_file = re.compile(r"(^|[/\\])tests([/\\]|$)|(^|[/\\])[^/\\]*_test\.rs$")
 
     for f in glob.glob(os.path.join(source_root, "**", f"*.{ext}"), recursive=True):
         rel = os.path.relpath(f, source_root).replace("\\", "/")
@@ -379,6 +434,29 @@ def extract_body(text: str, sig_index: int, lang: str) -> str | None:
     """The function body starting at sig_index: to the next sibling, or EOF."""
     from_pos = text.find("\n", sig_index)
     if from_pos == -1:
+        return None
+    if lang == "rust":
+        # Brace-matched, with string literals skipped so `format!("{x}")`
+        # cannot defeat the counter.
+        open_pos = text.find("{", sig_index)
+        if open_pos == -1:
+            return None
+        depth = 0
+        in_str = False
+        for i in range(open_pos, len(text)):
+            c = text[i]
+            if in_str:
+                if c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[open_pos + 1:i]
         return None
     if lang == "go":
         end = text.find("\n\nfunc ", from_pos + 1)

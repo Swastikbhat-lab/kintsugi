@@ -24,6 +24,7 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     case 'TS2835': return missingExtensionPatches(finding, sourceRoot);
     case 'F401': return unusedPythonImportPatches(finding, sourceRoot);
     case 'I001': return unsortedImportBlockPatches(finding, sourceRoot);
+    case 'unused_imports': return unusedRustImportPatches(finding, sourceRoot);
   }
   if (finding.check === 'version') return versionDriftPatches(finding, sourceRoot);
   const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
@@ -32,6 +33,7 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     if (/imported and not used/.test(message)) return unusedGoImportPatches(finding, sourceRoot);
     return assertionConstantPatches(finding, sourceRoot, 'go');
   }
+  if (finding.check === 'rs:test') return assertionConstantPatches(finding, sourceRoot, 'rust');
   return [];
 }
 
@@ -353,6 +355,30 @@ function unusedGoImportPatches(finding: Finding, sourceRoot: string): Patch[] {
   return removeLinePatch(finding.file, text, idx, `'${path}' is imported but not used — removing the import.`);
 }
 
+// -------------------------------------------------------------- unused import (rust)
+
+/**
+ * Unused `use` import (clippy `unused_imports`). Whole-line imports —
+ * `use std::fmt;`, optionally aliased — are removed outright, collapsing a
+ * surrounding blank line exactly like the Python rule. Group imports
+ * (`use a::{b, c};`) are left for a human: clippy names only the last
+ * segment, which cannot be re-anchored safely.
+ */
+function unusedRustImportPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const message = `${finding.summary} ${finding.evidence.message ?? ''}`;
+  const path = message.match(/`([^`]+)`/)?.[1];
+  if (!path) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length || !/^\s*use\s+/.test(line)) return [];
+  const re = new RegExp(`^\\s*use\\s+${escapeRegExp(path)}(?:\\s+as\\s+\\w+)?\\s*;\\s*$`);
+  if (!re.test(line)) return [];
+  return removeLinePatch(finding.file, text, idx, `'${path}' is imported but never used — removing the use.`);
+}
+
 // -------------------------------------------------------------- assertion → constant
 
 /**
@@ -367,7 +393,7 @@ function unusedGoImportPatches(finding: Finding, sourceRoot: string): Patch[] {
 function assertionConstantPatches(
   finding: Finding,
   sourceRoot: string,
-  lang: 'python' | 'go',
+  lang: 'python' | 'go' | 'rust',
 ): Patch[] {
   if (!finding.file || !finding.line) return [];
   const lines = readFileSync(finding.file, 'utf8').split(/\r?\n/);
@@ -377,7 +403,8 @@ function assertionConstantPatches(
 
   const impl = findFunctionBody(parsed.fn, sourceRoot, lang);
   if (!impl) return [];
-  const re = new RegExp(`\\b${escapeRegExp(impl.param)}\\s*\\*\\s*(\\d+(?:\\\.\\d+)?)\\b`);
+  const num = lang === 'rust' ? '\\d+(?:\\.\\d+)?(?:_?f(?:32|64))?' : '\\d+(?:\\.\\d+)?';
+  const re = new RegExp(`\\b${escapeRegExp(impl.param)}\\s*\\*\\s*(${num})\\b`);
   const m = impl.body.match(re);
   if (!m) return [];
 
@@ -389,18 +416,28 @@ function assertionConstantPatches(
   // A clean decimal only — `10/100 → 0.1`, but `10/3 → 3.3333333333333335`
   // is float noise, not a constant.
   if (!/^\d+\.?\d*$/.test(literal) || literal.length > 10) return [];
-  if (literal === m[1]) return [];
+  // Compare against the numeric part so a redundant `0.08_f64` -> `0.08`
+  // rewrite (which changes nothing) is never proposed.
+  if (literal === m[1].replace(/(?:_?f(?:32|64))?$/, '')) return [];
 
   const find = m[0];
-  const replace = m[0].replace(/\d+(?:\.\d+)?$/, literal);
+  const replace = m[0].replace(/\d+(?:\.\d+)?(?:_?f(?:32|64))?$/, literal);
   return uniqueOrEmpty(
     impl.file, impl.text, find, replace,
-    `The test asserts ${parsed.fn}(${parsed.arg}) == ${parsed.expected}; the constant '${impl.param} * ${m[1]}' makes it ${parsed.fn}(${parsed.arg}) == ${Number(m[1]) * arg} — setting it to ${literal}.`,
+    `The test asserts ${parsed.fn}(${parsed.arg}) == ${parsed.expected}; the constant '${impl.param} * ${m[1]}' makes it ${parsed.fn}(${parsed.arg}) == ${Number(m[1].match(/^[\d.]+/)?.[0] ?? m[1]) * arg} — setting it to ${literal}.`,
   );
 }
 
 /** Parse the failing assertion's own source line into { fn, arg, expected }. */
-function parseAssertion(line: string, lang: 'python' | 'go'): { fn: string; arg: string; expected: string } | null {
+function parseAssertion(line: string, lang: 'python' | 'go' | 'rust'): { fn: string; arg: string; expected: string } | null {
+  if (lang === 'rust') {
+    // `assert_eq!(f(n), want)` and the mirror `assert_eq!(want, f(n))`.
+    const call = line.match(/assert_eq!\s*\(\s*(\w+)\s*\(\s*([\d.]+)\s*\)\s*,\s*([\d.]+)/);
+    if (call) return { fn: call[1], arg: call[2], expected: call[3] };
+    const mirror = line.match(/assert_eq!\s*\(\s*([\d.]+)\s*,\s*(\w+)\s*\(\s*([\d.]+)\s*\)/);
+    if (mirror) return { fn: mirror[2], arg: mirror[3], expected: mirror[1] };
+    return null;
+  }
   if (lang === 'python') {
     // `assert f(n) == want` and the mirror `assert want == f(n)`.
     const call = line.match(/assert\s+(\w+)\s*\(\s*([\d.]+)\s*\)\s*==\s*([\d.]+)/);
@@ -421,21 +458,26 @@ function parseAssertion(line: string, lang: 'python' | 'go'): { fn: string; arg:
 function findFunctionBody(
   fn: string,
   sourceRoot: string,
-  lang: 'python' | 'go',
+  lang: 'python' | 'go' | 'rust',
 ): { file: string; text: string; body: string; param: string } | null {
-  const ext = lang === 'python' ? 'py' : 'go';
+  const ext = lang === 'python' ? 'py' : lang === 'go' ? 'go' : 'rs';
   const sigRe = lang === 'python'
     ? new RegExp(`def\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`)
-    : new RegExp(`func\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`);
+    : lang === 'go'
+      ? new RegExp(`func\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`)
+      : new RegExp(`fn\\s+${escapeRegExp(fn)}\\s*\\(([^)]*)\\)`);
   const paramRe = lang === 'python'
     ? /^\s*([A-Za-z_]\w*)\s*(?::[^,)]+)?(?:,|$)/
-    : /^\s*([A-Za-z_]\w*)\s+[^,)]+(?:,|$)/;
+    : lang === 'go'
+      ? /^\s*([A-Za-z_]\w*)\s+[^,)]+(?:,|$)/
+      : /^\s*([A-Za-z_]\w*)\s*:/;
   for (const f of globSync(`**/*.${ext}`, { cwd: sourceRoot })) {
     const rel = f.replace(/\\/g, '/');
-    if (/(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/.test(rel)) continue;
+    if (/(^|[\\/])(node_modules|dist|build|\.git|target)([\\/]|$)/.test(rel)) continue;
     // The defect is in product code, not in the test that caught it.
     if (lang === 'python' && /(?:^|[/\\])(?:test_|_test)\.py$/.test(rel)) continue;
     if (lang === 'go' && /\._test\.go$/.test(rel)) continue;
+    if (lang === 'rust' && (/(^|[\\/])tests([\\/]|$)/.test(rel) || /(^|[\\/])[^/\\]*_test\.rs$/.test(rel))) continue;
     const file = resolve(sourceRoot, f);
     const text = readFileSync(file, 'utf8');
     const sig = text.match(sigRe);
@@ -450,9 +492,31 @@ function findFunctionBody(
 }
 
 /** The function body starting at `sigIndex`: to the next sibling, or EOF. */
-function extractBody(text: string, sigIndex: number, lang: 'python' | 'go'): string | null {
+function extractBody(text: string, sigIndex: number, lang: 'python' | 'go' | 'rust'): string | null {
   const from = text.indexOf('\n', sigIndex);
   if (from === -1) return null;
+  if (lang === 'rust') {
+    // Brace-matched, with string literals skipped so `format!("{x}")`
+    // cannot defeat the counter.
+    const open = text.indexOf('{', sigIndex);
+    if (open === -1) return null;
+    let depth = 0;
+    let inStr = false;
+    for (let i = open; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) {
+        if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) return text.slice(open + 1, i);
+      }
+    }
+    return null;
+  }
   if (lang === 'go') {
     const end = text.indexOf('\n\nfunc ', from + 1);
     const until = end === -1 ? text.length : end + 1;
@@ -500,7 +564,7 @@ function resolveModule(moduleName: string, fromFile: string, sourceRoot: string)
   const files: string[] = [];
   for (const f of globSync('**/*.{ts,tsx,js,jsx,mjs,cjs}', { cwd: sourceRoot })) {
     const rel = f.replace(/\\/g, '/');
-    if (/(^|[\\/])(node_modules|dist|build|\.git)([\\/]|$)/.test(rel)) continue;
+    if (/(^|[\\/])(node_modules|dist|build|\.git|target)([\\/]|$)/.test(rel)) continue;
     files.push(resolve(sourceRoot, f));
   }
 

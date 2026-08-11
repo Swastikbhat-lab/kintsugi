@@ -68,6 +68,7 @@ own scripts offer — no config file needed for the common cases:
 - **Python** — `py:test` (pytest) and `py:lint` (ruff), venv-aware
   (`.venv`/`venv` preferred over the system interpreter)
 - **Go** — `go:test` (`go test ./...`) and `go:vet` (`go vet ./...`)
+- **Rust** — `rs:test` (`cargo test`) and `rs:lint` (`cargo clippy -D warnings`)
 - **Mixed** repos get the union of their toolchains
 
 **Two engines, one loop.** The orchestrator is TypeScript (agent graph,
@@ -81,8 +82,9 @@ Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing. `--list-checks` prints what would
 run. The mechanical repair rules cover TypeScript (dead declarations,
 imports, exports, extensions), Python (unused imports `F401`, unsorted
-import blocks `I001`, wrong constants behind failing assertions), and Go
-(unused imports, wrong constants behind failing assertions). Everything else
+import blocks `I001`, wrong constants behind failing assertions), Go (unused
+imports, wrong constants behind failing assertions), and Rust (unused `use`
+imports, wrong constants behind failing `assert_eq!`s). Everything else
 is surfaced as a typed, file-anchored finding and quarantined with evidence
 — or repaired by a model, if one is configured.
 

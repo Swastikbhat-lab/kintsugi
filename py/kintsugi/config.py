@@ -5,6 +5,7 @@ what is actually in the repo and what its toolchain can run:
 
   python   — `py:test` (pytest) and `py:lint` (ruff), venv-aware
   go       — `go:test` (go test ./...) and `go:vet` (go vet ./...)
+  rust     — `rs:test` (cargo test) and `rs:lint` (cargo clippy)
 
 npm repos are the Node engine's job: the Python engine is the non-Node path.
 Detection is marker-first and every toolchain check is gated on a quick
@@ -71,6 +72,7 @@ def default_checks(source_root: str, probe=probe_command):
     checks = []
     checks.extend(python_checks(source_root, probe))
     checks.extend(go_checks(source_root, probe))
+    checks.extend(rust_checks(source_root, probe))
     return checks
 
 
@@ -149,4 +151,21 @@ def go_checks(source_root: str, probe=probe_command):
     return [
         {"name": "go:vet", "command": "go vet ./...", "parser": "strict", "severity": "major"},
         {"name": "go:test", "command": "go test ./...", "parser": "strict", "severity": "blocker"},
+    ]
+
+
+# ------------------------------------------------------------- rust
+
+def rust_checks(source_root: str, probe=probe_command):
+    if not os.path.exists(os.path.join(source_root, "Cargo.toml")):
+        return []
+    if not probe("cargo --version"):
+        return []
+    # `-D warnings` is what makes clippy a *check*: without it the
+    # lints are advisory and clippy exits 0. Cargo cold-builds the
+    # crate (and its deps) before testing or linting, so these checks
+    # carry a longer timeout than the 120s default.
+    return [
+        {"name": "rs:lint", "command": "cargo clippy -- -D warnings", "parser": "rust", "severity": "minor", "timeoutMs": 300_000},
+        {"name": "rs:test", "command": "cargo test --quiet", "parser": "rust", "severity": "blocker", "timeoutMs": 300_000},
     ]

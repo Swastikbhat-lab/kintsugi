@@ -18,6 +18,10 @@ jobs:
         run: cd fixture && npm install
       - name: Install Python toolchain (for the Python loop test)
         run: pip install pytest ruff
+      - name: Install Rust toolchain (for the Rust loop test)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
