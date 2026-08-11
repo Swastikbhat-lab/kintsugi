@@ -1,7 +1,10 @@
 import os
+import shutil
 import subprocess
 import sys
 from functools import cmp_to_key
+
+import pytest
 
 from kintsugi.config import default_checks
 from kintsugi.parsers import parse_radon
@@ -336,6 +339,7 @@ def test_hardcoded_secret_patch_applies_with_its_import_companion(tmp_path):
 
 # ------------------------------------------------------------- radon wrapper
 
+@pytest.mark.skipif(shutil.which("radon") is None, reason="radon not installed")
 def test_radon_wrapper_survives_a_broken_pyproject_toml(tmp_path):
     (tmp_path / "pyproject.toml").write_text("pyproject.toml\n", encoding="utf-8")
     (tmp_path / "tax.py").write_text(
