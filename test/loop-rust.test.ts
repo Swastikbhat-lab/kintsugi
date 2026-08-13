@@ -22,7 +22,20 @@ function cargo(): string | null {
 
 const CARGO = cargo();
 
-test('the loop repairs a Rust fixture: stale constant and unused use import', { skip: !CARGO ? 'cargo not installed — set CARGO to run' : false }, async () => {
+/** The loop-verify gate here is *clippy*, not just cargo — the test asserts
+ * clippy-verified commits. Skip when clippy itself cannot run: not
+ * installed, or blocked by an OS policy (e.g. Windows Application
+ * Control), which makes the whole harness broken, not the fixture. */
+function clippyOk(): boolean {
+  if (!CARGO) return false;
+  try {
+    const r = spawnSync(CARGO, ['clippy', '--version'], { timeout: 15_000, encoding: 'utf8' });
+    return r.status === 0;
+  } catch { return false; }
+}
+const CLIPPY_OK = clippyOk();
+
+test('the loop repairs a Rust fixture: stale constant and unused use import', { skip: !CLIPPY_OK ? 'cargo clippy not runnable (not installed, or blocked by policy) — set CARGO and a working clippy' : false }, async () => {
   const source = mkdtempSync(join(tmpdir(), 'kintsugi-rust-loop-'));
   mkdirSync(join(source, 'src'), { recursive: true });
   const files: Record<string, string> = {

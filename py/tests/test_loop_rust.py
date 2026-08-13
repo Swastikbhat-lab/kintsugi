@@ -22,9 +22,26 @@ def _cargo():
 
 CARGO = _cargo()
 
+
+def _clippy_ok():
+    # The loop-verify gate here is *clippy*, not just cargo — the test
+    # asserts clippy-verified commits. Skip when clippy itself cannot run:
+    # not installed, or blocked by an OS policy (e.g. Windows Application
+    # Control), which makes the whole harness broken, not the fixture.
+    if not CARGO:
+        return False
+    try:
+        r = subprocess.run([CARGO, "clippy", "--version"], capture_output=True, timeout=15, text=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+CLIPPY_OK = _clippy_ok()
+
 pytestmark = pytest.mark.skipif(
-    not CARGO,
-    reason="cargo not installed — set CARGO to run",
+    not CLIPPY_OK,
+    reason="cargo clippy not runnable (not installed, or blocked by policy) — set CARGO and a working clippy to run",
 )
 
 

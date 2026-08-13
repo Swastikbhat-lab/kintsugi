@@ -139,7 +139,7 @@ def test_critic_majority_can_reject_a_patch_before_it_is_applied(tmp_path):
         def preflight(self):
             return {"ok": True, "detail": "reachable (test stub)"}
 
-        def propose(self, finding, source_root):
+        def propose(self, finding, source_root, context=None, tools=None):
             return [{
                 "id": "stub", "file": str(tax),
                 "find": "return amount", "replace": "return amount * 0.1",
@@ -179,7 +179,7 @@ def test_critic_abstention_keeps_and_the_patch_commits(tmp_path):
         def preflight(self):
             return {"ok": True, "detail": "reachable (test stub)"}
 
-        def propose(self, finding, source_root):
+        def propose(self, finding, source_root, context=None, tools=None):
             return [{
                 "id": "stub", "file": str(src / "tax.py"),
                 "find": "return amount", "replace": "return amount * 0.1",
@@ -212,7 +212,7 @@ def test_critics_are_asked_the_three_questions_in_parallel(tmp_path):
         def preflight(self):
             return {"ok": True, "detail": "reachable (test stub)"}
 
-        def propose(self, finding, source_root):
+        def propose(self, finding, source_root, context=None, tools=None):
             return [{
                 "id": "stub", "file": str(src / "tax.py"),
                 "find": "return amount", "replace": "return amount * 0.1",

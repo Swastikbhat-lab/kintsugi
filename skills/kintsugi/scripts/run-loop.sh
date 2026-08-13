@@ -83,6 +83,68 @@ is_python_repo() {
   return 1
 }
 
+# --install-agents: ship the observer/healer/critic/verifier subagents into
+# the user-level Claude Code agents dir, so the loop can be driven by hand.
+# The fleet lives in the skill dir (`agents/`, the skill-only layout) or in
+# the engine checkout (`.claude/agents/`, the plugin layout).
+if [[ " $* " == *" --install-agents "* ]]; then
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -d "$here/agents" ]]; then
+    AGENT_SRC="$here/agents"
+  else
+    AGENT_SRC="$(find_engine)/.claude/agents"
+  fi
+  [[ -f "$AGENT_SRC/kintsugi-observer.md" ]] || { echo "kintsugi: agent definitions not found at $AGENT_SRC" >&2; exit 1; }
+  mkdir -p "$HOME/.claude/agents"
+  cp "$AGENT_SRC"/kintsugi-*.md "$HOME/.claude/agents/"
+  echo "kintsugi: installed the fleet (observer, healer, critic, verifier) → $HOME/.claude/agents/" >&2
+  echo "kintsugi: drive it by hand — ask kintsugi-observer to run a check, kintsugi-healer to propose a repair, kintsugi-verifier to apply and prove it." >&2
+  exit 0
+fi
+
+# --selfcheck: verify the installation end-to-end, writing nothing. Locates
+# (or bootstraps) the engine, probes the runtimes the loop depends on, and
+# runs the bundled fixture through the real observe→diagnose→repair→verify→
+# settle loop in --dry mode. Exits 0 only if the whole chain converges.
+if [[ " $* " == *" --selfcheck "* ]]; then
+  ENG="$(find_engine)"
+  [[ -f "$ENG/fixture/kintsugi.config.json" ]] || { echo "kintsugi: selfcheck FAIL — no fixture in engine checkout; selfcheck needs a full engine clone" >&2; exit 1; }
+  command -v node >/dev/null 2>&1 || { echo "kintsugi: selfcheck FAIL — node not found (the npm fixture dry-run needs it)" >&2; exit 1; }
+  if [[ ! -d "$ENG/node_modules" ]]; then
+    echo "kintsugi: installing engine dependencies (one-time)…" >&2
+    npm --prefix "$ENG" install --no-audit --no-fund >/dev/null 2>&1 || npm --prefix "$ENG" install
+  fi
+  echo "kintsugi: selfcheck — engine: $ENG" >&2
+  echo "kintsugi: selfcheck — node: $(node --version)" >&2
+  for t in python3 python go cargo rustc; do
+    if command -v "$t" >/dev/null 2>&1; then
+      echo "kintsugi: selfcheck — $t: present (gated on availability)" >&2
+    else
+      echo "kintsugi: selfcheck — $t: absent (fine — checks are gated on probes)" >&2
+    fi
+  done
+  echo "kintsugi: selfcheck — running the bundled fixture dry-run (writes nothing)…" >&2
+  # The `if` context keeps `set -e` from killing the script on the dry-run's
+  # expected non-zero exit — the exit code is captured, not propagated. And
+  # the CLI exits 1 whenever findings remain, which in a dry run they always
+  # do (nothing is applied). The pass signal is the loop *converging*: the
+  # engine boots, the checks run, observe→…→settle completes, and the
+  # harness itself never crashed.
+  if OUT="$(npm --prefix "$ENG" run --silent cli -- --source "$ENG/fixture" --config "$ENG/fixture/kintsugi.config.json" --dry 2>&1)"; then
+    RC=0
+  else
+    RC=$?
+  fi
+  if printf '%s\n' "$OUT" | grep -q "CONVERGED"; then
+    echo "kintsugi: selfcheck PASS — engine boots and the loop converges dry (rc=$RC is expected — findings remain in dry mode)." >&2
+    printf '%s\n' "$OUT" | tail -5 | sed 's/^/    /'
+    exit 0
+  fi
+  echo "kintsugi: selfcheck FAIL — the fixture dry-run did not converge (rc=$RC):" >&2
+  printf '%s\n' "$OUT" | tail -15 | sed 's/^/    /'
+  exit 1
+fi
+
 SRC="$(resolve_source "$@")"
 
 RUNNER="${KINTSUGI_RUNNER:-}"

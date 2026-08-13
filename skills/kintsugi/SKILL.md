@@ -26,6 +26,8 @@ skill installed:
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --dry    # survey, write nothing
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source .          # repair
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source . --watch  # keep repairing as it drifts
+~/.claude/skills/kintsugi/scripts/run-loop.sh --install-agents    # ship the observer/healer/critic/verifier subagents
+~/.claude/skills/kintsugi/scripts/run-loop.sh --selfcheck         # verify the install: boots the engine, runs the fixture dry
 ```
 
 `--watch` keeps the loop resident: it watches the repo and runs a pass a
@@ -88,11 +90,15 @@ never gets a check whose tool is missing. `--list-checks` prints what would
 run. The mechanical repair rules cover TypeScript (dead declarations,
 imports, exports, extensions), Python (unused imports `F401`, unsorted
 import blocks `I001`, wrong constants behind failing assertions,
-best-practice rewrites `T201`/`T202`/`T203`, and **test generation** — a
-function with no tests gets a smoke test file next to the module, run
-through the verify gate), Go (unused imports, wrong constants behind
-failing assertions), and Rust (unused `use` imports, wrong constants
-behind failing `assert_eq!`s). Everything else — security findings from
+best-practice rewrites `T201`/`T202`/`T203`, comparison-style rewrites
+`E711`/`E712`/`E713`/`E714` — `x == None` → `x is None`, `x == True` →
+`x is True`, `not x in y` → `x not in y`, `not x is y` → `x is not y` —
+and type comparison `E721` — `type(x) == int` → `isinstance(x, int)`, and
+`type(a) == type(b)` → `type(a) is type(b)` —
+and **test generation**: a function with no tests gets a smoke test file
+next to the module, run through the verify gate), Go (unused imports,
+wrong constants behind failing assertions), and Rust (unused `use`
+imports, wrong constants behind failing `assert_eq!`s). Everything else — security findings from
 bandit, C+ complexity from radon, perf anti-patterns, TODOs, prints — is
 scored, ranked, and surfaced as a typed, file-anchored finding, quarantined
 with evidence or repaired by a model if one is configured.
@@ -126,9 +132,10 @@ parity CI test proves it.
 ## The fleet (agents)
 
 Each iteration deploys a multi-agent work graph. The engine runs it in
--process; the same roles also ship as Claude Code subagents (`.claude/agents/`
-in this repo, installed user-wide at `~/.claude/agents/`) for driving the
-loop by hand:
+-process; the same roles also ship as Claude Code subagents — bundled with
+the skill at `agents/` (and in the plugin at `.claude/agents/`), installed
+user-wide with `run-loop.sh --install-agents` — for driving the loop by
+hand:
 
 - **kintsugi-observer** — one per check, concurrent: run the check, report
   typed findings, never invent a failure, never call a crash a defect.

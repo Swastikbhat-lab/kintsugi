@@ -254,3 +254,213 @@ def test_go_test_the_plain_if_got_shape_works_too(tmp_path):
     ), root)
     assert patches
     assert patches[0]["replace"] == "amount * 0.1"
+
+
+# ------------------------------------------------------- E711-E714 comparison style
+
+def e7_finding(tmp_path, content, line, code):
+    root = make_repo(tmp_path, {"a.py": content})
+    message = f"{code} Comparison"
+    return propose_patches(finding(
+        file=os.path.join(root, "a.py"), line=line, code=code,
+        summary=message, evidence={"message": message, "col": 12, "code": code},
+    ), root)
+
+
+def test_e711_rewrites_eq_none_to_is_none(tmp_path):
+    pats = e7_finding(tmp_path, "def c(x):\n    return x == None\n", 2, "E711")
+    assert pats
+    assert pats[0]["find"] == "    return x == None"
+    assert pats[0]["replace"] == "    return x is None"
+
+
+def test_e711_rewrites_neq_none_to_is_not_none(tmp_path):
+    pats = e7_finding(tmp_path, "def c(x):\n    return x != None\n", 2, "E711")
+    assert pats
+    assert pats[0]["replace"] == "    return x is not None"
+
+
+def test_e711_rewrites_the_negated_form_in_one_edit(tmp_path):
+    # `not x == None` half-rewritten would come back as a brand-new E714 on
+    # the verify gate's re-run and regress the patch — the rule must land
+    # directly on the final form.
+    pats = e7_finding(tmp_path, "def c(x):\n    return not x == None\n", 2, "E711")
+    assert pats
+    assert pats[0]["replace"] == "    return x is not None"
+
+
+def test_e711_rewrites_every_occurrence_on_the_line(tmp_path):
+    # ruff reports `x == None and y == None` as *one* finding (same message,
+    # same fingerprint) — a partial rewrite would leave that fingerprint
+    # behind and the verify gate would call the patch ineffective.
+    pats = e7_finding(tmp_path, "def c(x, y):\n    return x == None and y == None\n", 2, "E711")
+    assert pats
+    assert pats[0]["replace"] == "    return x is None and y is None"
+
+
+def test_e711_refuses_chained_comparisons(tmp_path):
+    # Rewriting either end of `a == b == None` would corrupt the chain.
+    for content in (
+        "def c(x, y):\n    return x == None == y\n",
+        "def c(a, x):\n    return a == x == None\n",
+    ):
+        assert e7_finding(tmp_path, content, 2, "E711") == []
+
+
+def test_e711_handles_attribute_operands(tmp_path):
+    pats = e7_finding(
+        tmp_path, "class C:\n    def m(self):\n        return self.x == None\n", 3, "E711"
+    )
+    assert pats
+    assert pats[0]["replace"] == "        return self.x is None"
+
+
+def test_e712_rewrites_bool_comparisons_to_identity(tmp_path):
+    for content, want in (
+        ("def c(x):\n    return x == True\n", "    return x is True"),
+        ("def c(x):\n    return x != False\n", "    return x is not False"),
+        ("def c(x):\n    return not x == True\n", "    return x is not True"),
+    ):
+        pats = e7_finding(tmp_path, content, 2, "E712")
+        assert pats, f"expected a patch for {content!r}"
+        assert pats[0]["replace"] == want
+
+
+def test_e713_rewrites_not_in_to_not_in(tmp_path):
+    pats = e7_finding(tmp_path, "def c(x, y):\n    return not x in y\n", 2, "E713")
+    assert pats
+    assert pats[0]["replace"] == "    return x not in y"
+
+
+def test_e714_rewrites_not_is_to_is_not(tmp_path):
+    pats = e7_finding(tmp_path, "def c(x, y):\n    return not x is y\n", 2, "E714")
+    assert pats
+    assert pats[0]["replace"] == "    return x is not y"
+
+
+def test_e714_refuses_a_not_operand_rather_than_corrupting_the_line(tmp_path):
+    # In `not x is not y` the second `not` is an operator, not the operand.
+    assert e7_finding(tmp_path, "def c(x, y):\n    return not x is not y\n", 2, "E714") == []
+
+
+def test_e7_refuses_a_non_unique_anchor(tmp_path):
+    # The same offending line twice in the file: no unique anchor, no patch.
+    content = "def c(x):\n    return x == None\n    return x == None\n"
+    assert e7_finding(tmp_path, content, 2, "E711") == []
+
+
+# ------------------------------------------------------- E721 type comparison
+
+def e721_finding(tmp_path, content, line):
+    return e7_finding(tmp_path, content, line, "E721")
+
+
+def test_e721_rewrites_type_eq_to_isinstance(tmp_path):
+    pats = e721_finding(tmp_path, "def c(x):\n    return type(x) == int\n", 2)
+    assert pats
+    assert pats[0]["replace"] == "    return isinstance(x, int)"
+
+
+def test_e721_rewrites_type_neq_to_not_isinstance(tmp_path):
+    pats = e721_finding(tmp_path, "def c(x):\n    return type(x) != int\n", 2)
+    assert pats
+    assert pats[0]["replace"] == "    return not isinstance(x, int)"
+
+
+def test_e721_handles_type_on_the_right(tmp_path):
+    for content, want in (
+        ("def c(x):\n    return int == type(x)\n", "    return isinstance(x, int)"),
+        ("def c(x):\n    return int != type(x)\n", "    return not isinstance(x, int)"),
+    ):
+        pats = e721_finding(tmp_path, content, 2)
+        assert pats, f"expected a patch for {content!r}"
+        assert pats[0]["replace"] == want
+
+
+def test_e721_negated_form_lands_directly_on_the_final_edit(tmp_path):
+    # `not type(x) == int` must fold to `not isinstance(x, int)` and
+    # `not type(x) != int` to `isinstance(x, int)` in one edit — folding
+    # the `not` is what makes the `!=` case correct.
+    for content, want in (
+        ("def c(x):\n    return not type(x) == int\n", "    return not isinstance(x, int)"),
+        ("def c(x):\n    return not type(x) != int\n", "    return isinstance(x, int)"),
+    ):
+        pats = e721_finding(tmp_path, content, 2)
+        assert pats, f"expected a patch for {content!r}"
+        assert pats[0]["replace"] == want
+
+
+def test_e721_two_type_calls_become_the_identity_test(tmp_path):
+    for content, want in (
+        ("def c(x, y):\n    return type(x) == type(y)\n", "    return type(x) is type(y)"),
+        ("def c(x, y):\n    return type(x) != type(y)\n", "    return type(x) is not type(y)"),
+        ("def c(x, y):\n    return not type(x) == type(y)\n", "    return type(x) is not type(y)"),
+        ("def c(x, y):\n    return not type(x) != type(y)\n", "    return type(x) is type(y)"),
+    ):
+        pats = e721_finding(tmp_path, content, 2)
+        assert pats, f"expected a patch for {content!r}"
+        assert pats[0]["replace"] == want
+
+
+def test_e721_handles_dotted_and_subscript_types(tmp_path):
+    for content, want in (
+        ("def c(x):\n    return type(x) == collections.OrderedDict\n",
+         "    return isinstance(x, collections.OrderedDict)"),
+        ("def c(x):\n    return type(x) == list[int]\n",
+         "    return isinstance(x, list[int])"),
+        ("def c(x):\n    return type(x[0]) == int\n",
+         "    return isinstance(x[0], int)"),
+        ("def c(x):\n    return type(f()) == int\n",
+         "    return isinstance(f(), int)"),
+    ):
+        pats = e721_finding(tmp_path, content, 2)
+        assert pats, f"expected a patch for {content!r}"
+        assert pats[0]["replace"] == want
+
+
+def test_e721_rewrites_every_occurrence_on_the_line(tmp_path):
+    # ruff reports `type(a) == int and type(b) == str` as two findings with
+    # one message, hence one fingerprint — a partial rewrite would leave it
+    # behind and the verify gate would call the patch ineffective.
+    pats = e721_finding(
+        tmp_path, "def c(a, b):\n    return type(a) == int and type(b) == str\n", 2
+    )
+    assert pats
+    assert pats[0]["replace"] == "    return isinstance(a, int) and isinstance(b, str)"
+
+
+def test_e721_refuses_chained_comparisons(tmp_path):
+    for content in (
+        "def c(x, y):\n    return type(x) == int == y\n",
+        "def c(a, x):\n    return a == type(x) == int\n",
+    ):
+        assert e721_finding(tmp_path, content, 2) == []
+
+
+def test_e721_refuses_a_keyword_rhs(tmp_path):
+    # `type(x) == None` would become the TypeError isinstance(x, None).
+    assert e721_finding(tmp_path, "def c(x):\n    return type(x) == None\n", 2) == []
+
+
+def test_e721_refuses_a_truncated_subscript_rather_than_corrupting_the_line(tmp_path):
+    # A nested bracket would truncate the subscript at the inner `[`; the
+    # tail guard refuses the shape instead of emitting a corrupt line.
+    assert e721_finding(
+        tmp_path, "def c(x):\n    return type(x) == dict[str, list[int]]\n", 2
+    ) == []
+
+
+def test_e721_leaves_the_identity_form_alone(tmp_path):
+    # `type(x) is int` is the fixed form (ruff 0.16 no longer flags it) —
+    # the rule must not rewrite it.
+    assert e721_finding(tmp_path, "def c(x):\n    return type(x) is int\n", 2) == []
+
+
+def test_e721_refuses_a_mid_identifier_type_anchor(tmp_path):
+    # `mytype(x) == int` must not be re-matched as `type(x) == int`.
+    assert e721_finding(tmp_path, "def c(x):\n    return mytype(x) == int\n", 2) == []
+
+
+def test_e721_refuses_a_non_unique_anchor(tmp_path):
+    content = "def c(x):\n    return type(x) == int\n    return type(x) == int\n"
+    assert e721_finding(tmp_path, content, 2) == []

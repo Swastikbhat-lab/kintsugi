@@ -5,6 +5,7 @@ import type {
 } from './types.js';
 import { Ledger, ledgerPathFor } from './ledger.js';
 import { proposePatches } from './propose.js';
+import { ToolRunner } from './tools.js';
 import { runCheck } from './checks.js';
 import { verifyPatch } from './verify.js';
 import { buildImportGraph, scopeOf } from './imports.js';
@@ -322,11 +323,30 @@ export class Loop {
         // Rules first: free, instant, and proven on these classes.
         let candidates = await proposePatches(target, sourceRoot);
 
+        // Blast radius is decided from what the file is — a repair that
+        // touches a module other files import changes code the loop is not
+        // looking at, and the verify gate cannot catch that. It is computed
+        // *before* the model is consulted so the proposer can see it too
+        // (model-callable context, borrowed from NOOA).
+        const graph = buildImportGraph(sourceRoot);
+
         // The model is consulted only for what the rules could not reach.
         if (candidates.length === 0 && this.provider) {
           emit(`No rule covers ${target.code ?? target.check} — asking ${this.provider.name}`);
           try {
-            candidates = await this.provider.propose(target, sourceRoot);
+            const history = this.ledger.history(target.fingerprint);
+            const { scope, importers } = scopeOf(graph, target.file ?? '');
+            candidates = await this.provider.propose(target, sourceRoot, {
+              ...(history.length
+                ? {
+                    ledger: history.map((a) => ({
+                      outcome: a.outcome,
+                      patch: { find: a.patch.find, replace: a.patch.replace },
+                    })),
+                  }
+                : {}),
+              ...(scope === 'shared' ? { importers } : {}),
+            }, new ToolRunner(sourceRoot, graph));
             emit(`${this.provider.name} proposed ${candidates.length} candidate(s)`);
             const usage = (this.provider as any)?.lastUsage ?? {};
             this.tracer.generation(
@@ -345,10 +365,6 @@ export class Loop {
           }
         }
 
-        // Blast radius is decided now, from what the file is — a repair that
-        // touches a module other files import changes code the loop is not
-        // looking at, and the verify gate cannot catch that.
-        const graph = buildImportGraph(sourceRoot);
         for (const p of candidates) {
           const { scope, importers } = scopeOf(graph, p.file);
           p.scope = scope;

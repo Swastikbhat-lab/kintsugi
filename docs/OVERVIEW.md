@@ -73,6 +73,15 @@ repeat it.
 | missing `export` keywords | yes (when the declaration exists) | yes |
 | missing import extensions (NodeNext) | yes | yes |
 | stale version strings | yes (package.json is ground truth) | yes |
+| unused imports (Python `F401`, Go, Rust `use`) | yes | yes |
+| unsorted import blocks (Python `I001`) | yes (isort-style) | yes |
+| `x == None`, `x == True`, `not x in y`, `not x is y` (`E711`–`E714`) | yes (identity / `not in` / `is not` rewrites) | yes |
+| `type(x) == T` (`E721`) | yes (`isinstance` rewrite; identity when both sides are `type()` calls) | yes |
+| `type(x) == T`, `len(x) == 0`, `key in d.keys()` (`T201`–`T203`) | yes (`isinstance`, truthiness, `in d`) | yes |
+| wrong constant behind a failing assertion (py/go/rust) | yes (recomputed from the assertion) | yes |
+| functions with no tests (Python `T001`) | yes (generated smoke test, run through the gate) | yes |
+| hardcoded secrets (bandit `B105`, `T105`) | yes (moved to `os.environ`) | yes |
+| weak hashes (bandit `B324`) | yes (explicit `usedforsecurity=False`) | yes |
 | wrong behaviour behind a failing test | no rule — model proposes | only after the checks verify |
 | missing functions / missing features | no | quarantined with evidence |
 | "this design is confusing" | — | outside the loop |
@@ -86,9 +95,17 @@ A defect with no objective check cannot be looped on at all.
   but no run has confirmed a model-proposed patch surviving verification —
   treat the first run with a credential as the real test. The mock path
   exercises the identical flow, including the learn-from-a-miss story above.
-- **Watch mode.** Single runs are snapshots; cadence mode (the v1 `--watch`)
-  is the natural next step and is not ported yet.
-- **More rule classes.** Every new mechanically-fixable check (formatting,
-  dead code, deprecations) is one more switch arm in `src/propose.ts`.
+- **More rule classes.** The comparison-style family (`E711`–`E714`) and
+  type comparison (`E721`) are the newest arms in both engines; every
+  other mechanically-fixable check (formatting, dead code, deprecations)
+  is one more switch arm in `src/propose.ts`.
+- **A live Langfuse dashboard.** The tracer and audit are proven end-to-end
+  against the local mock with real SDK calls; pointing them at a real
+  project is the remaining gap.
 - **This is not a product.** No accounts, no hosting. It runs from a command
   line, or as a skill inside any agent that reads `skills/kintsugi/`.
+
+Watch mode is not on this list — it exists. `run-loop.sh --watch` keeps the
+loop resident (polling in the Python engine, file-watching in the Node
+engine), re-running a pass a couple of seconds after each change settles and
+ignoring its own writes so a repair never re-triggers itself.

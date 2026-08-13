@@ -28,6 +28,11 @@ export async function proposePatches(finding: Finding, sourceRoot: string): Prom
     case 'T201': return bestPracticePatches(finding, sourceRoot, 'T201');
     case 'T202': return bestPracticePatches(finding, sourceRoot, 'T202');
     case 'T203': return bestPracticePatches(finding, sourceRoot, 'T203');
+    case 'E711':
+    case 'E712':
+    case 'E713':
+    case 'E714': return comparisonStylePatches(finding, sourceRoot, finding.code);
+    case 'E721': return typeComparisonPatches(finding, sourceRoot);
     case 'T001': return testgenPatches(finding, sourceRoot);
     case 'T105': return hardcodedSecretPatches(finding, sourceRoot);
     case 'B105': return hardcodedSecretPatches(finding, sourceRoot);
@@ -444,6 +449,236 @@ function bestPracticePatches(
   }
 
   return uniqueOrEmpty(finding.file, text, find, replace, rationale);
+}
+
+// ------------------------------------------------------- comparison style (E711–E714)
+
+/**
+ * The pyflakes/ruff comparison family. E711 (`x == None`) and E712
+ * (`x == True`) want identity — `is`/`is not` — not equality; E713
+ * (`not x in y`) wants the direct `not in`; E714 (`not x is y`) wants
+ * `is not`. Each rewrite is anchored on the reported line and preserves the
+ * rest of it verbatim, and every occurrence on the line is rewritten
+ * together — ruff reports `x == None and y == None` as *one* finding (same
+ * message, same fingerprint), so a partial rewrite would leave that
+ * fingerprint behind and the verify gate would correctly call it
+ * ineffective. E712's `is True` rewrite changes semantics for non-bool
+ * operands (`1 == True` is True, `1 is True` is not) — it is exactly the
+ * form the linter's own message recommends, and the verify gate's checks
+ * are the backstop.
+ */
+
+// A bounded expression: identifiers, dotted names, subscripts and calls with
+// simple non-nested arguments. Anything more complex ends the match, so a
+// shape the rule cannot anchor exactly yields no patch instead of a wrong one.
+const CMP_EXPR = '[A-Za-z_][\\w.]*(?:\\[[^\\]\\n]*\\]|\\([^()\\n]*\\))*';
+
+// Operands that must never be captured: in `not x is not y` the second `not`
+// is an operator, not the right operand, and rewriting it would corrupt the
+// line. Refusing beats guessing.
+const CMP_OPERAND_KEYWORDS = new Set(['not', 'and', 'or', 'in', 'is', 'None', 'True', 'False']);
+
+// A comparison operator immediately before the matched span means the match
+// is the tail of a chained comparison (`a == x == None`) — refuse it.
+const CMP_PRECEDING = /(?:==|!=|<=|>=|<|>|is\b|in\b)\s*$/;
+
+// `[not] <expr> (==|!=) None` and the mirror. E711 is reported for Eq/NotEq
+// against None; the negated form must land directly on `is not`/`is`, or the
+// verify gate's re-run would surface the half-rewritten `not x is None` as a
+// brand-new E714 and regress the patch.
+const EQ_NONE_FWD = new RegExp(
+  `(?<neg>\\bnot\\s+)?(?<left>${CMP_EXPR})\\s*(?<op>==|!=)\\s*(?<right>None)\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+const EQ_NONE_REV = new RegExp(
+  `(?<neg>\\bnot\\s+)?(?<left>None)\\s*(?<op>==|!=)\\s*(?<right>${CMP_EXPR})\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+
+// Same shapes for E712 against True/False. E712 fires on `==`/`!=` only —
+// `is True` is the form the finding's own message recommends.
+const EQ_BOOL_FWD = new RegExp(
+  `(?<neg>\\bnot\\s+)?(?<left>${CMP_EXPR})\\s*(?<op>==|!=)\\s*(?<right>True|False)\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+const EQ_BOOL_REV = new RegExp(
+  `(?<neg>\\bnot\\s+)?(?<left>True|False)\\s*(?<op>==|!=)\\s*(?<right>${CMP_EXPR})\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+
+// `not x in y` → `x not in y` (E713) and `not x is y` → `x is not y` (E714).
+// The `not` is mandatory — without it there is nothing to fix.
+const NOT_IN = new RegExp(
+  `(?<neg>\\bnot\\s+)(?<left>${CMP_EXPR})\\s+in\\s+(?<right>${CMP_EXPR})\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+const NOT_IS = new RegExp(
+  `(?<neg>\\bnot\\s+)(?<left>${CMP_EXPR})\\s+is\\s+(?<right>${CMP_EXPR})\\b(?!\\s*(?:==|!=|<=|>=|<|>|is\\b|in\\b))`,
+);
+
+const COMPARISON_RATIONALE: Record<string, string> = {
+  E711: "comparison to None with ==/!= — using the identity test 'is'/'is not' that was meant.",
+  E712: "comparison to a bool literal with ==/!= — using the identity test 'is'/'is not' the linter asks for.",
+  E713: "'not x in y' — using the direct membership test 'x not in y'.",
+  E714: "'not x is y' — using the direct identity test 'x is not y'.",
+};
+
+type CmpGuard = 'left' | 'right' | 'lhs' | 'rhs';
+
+/** Rewrite every match of `re` in `line` via `repl`, advancing past each. */
+function rewriteAll(line: string, re: RegExp, repl: (m: RegExpExecArray) => string): string {
+  // All matches are found on the original line first (like Python's re.sub),
+  // so repl sees indices consistent with `line` — crucial for the
+  // preceded-by-comparison guard.
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  const found: Array<{ m: RegExpExecArray; rep: string }> = [];
+  for (let m: RegExpExecArray | null; (m = g.exec(line)) !== null; ) found.push({ m, rep: repl(m) });
+  let out = '';
+  let cursor = 0;
+  for (const { m, rep } of found) {
+    out += line.slice(cursor, m.index) + rep;
+    cursor = m.index + m[0].length;
+  }
+  return out + line.slice(cursor);
+}
+
+function cmpEqRepl(m: RegExpExecArray, guards: CmpGuard[], line: string): string {
+  const g = m.groups!;
+  if (guards.some((k) => CMP_OPERAND_KEYWORDS.has(g[k] ?? ''))) return m[0];
+  if (CMP_PRECEDING.test(line.slice(0, m.index))) return m[0];
+  const isIdentity = (g.op === '==') !== !!g.neg;
+  return `${g.left} ${isIdentity ? 'is' : 'is not'} ${g.right}`;
+}
+
+function cmpNotRepl(m: RegExpExecArray, guards: CmpGuard[], token: string, line: string): string {
+  const g = m.groups!;
+  if (guards.some((k) => CMP_OPERAND_KEYWORDS.has(g[k] ?? ''))) return m[0];
+  if (CMP_PRECEDING.test(line.slice(0, m.index))) return m[0];
+  return `${g.left} ${token} ${g.right}`;
+}
+
+function comparisonStylePatches(finding: Finding, sourceRoot: string, code: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length) return [];
+
+  const specs = code === 'E711' ? [
+    { re: EQ_NONE_FWD, guards: ['left'] as CmpGuard[], eq: true, token: '' },
+    { re: EQ_NONE_REV, guards: ['right'] as CmpGuard[], eq: true, token: '' },
+  ] : code === 'E712' ? [
+    { re: EQ_BOOL_FWD, guards: ['left'] as CmpGuard[], eq: true, token: '' },
+    { re: EQ_BOOL_REV, guards: ['right'] as CmpGuard[], eq: true, token: '' },
+  ] : code === 'E713' ? [
+    { re: NOT_IN, guards: ['left', 'right'] as CmpGuard[], eq: false, token: 'not in' },
+  ] : code === 'E714' ? [
+    { re: NOT_IS, guards: ['left', 'right'] as CmpGuard[], eq: false, token: 'is not' },
+  ] : [];
+
+  let out = line;
+  for (const { re, guards, eq, token } of specs) {
+    const before = out;
+    out = rewriteAll(before, re, (m) =>
+      eq ? cmpEqRepl(m, guards, before) : cmpNotRepl(m, guards, token, before));
+  }
+  if (out === line) return [];
+  return uniqueOrEmpty(finding.file, text, line, out, COMPARISON_RATIONALE[code]);
+}
+
+// ------------------------------------------------------- type comparison (E721)
+
+/**
+ * `type(x) == T` — E721. The rule's name says it: do not compare types,
+ * use isinstance(). For type-vs-name shapes the rewrite is
+ * `isinstance(x, T)` / `not isinstance(x, T)`; when both sides are type()
+ * calls the only sensible rewrite is the identity test `type(a) is
+ * type(b)` — exactly equivalent, and the form the rule's own message
+ * offers. isinstance changes semantics for subclasses (a subclass
+ * instance passes isinstance but fails `type() ==`) — it is what the rule
+ * asks for, and the verify gate's checks are the backstop, exactly as for
+ * E712's `is True`. Every occurrence on the line is rewritten together:
+ * ruff reports `type(a) == int and type(b) == str` as two findings with
+ * one message, hence one fingerprint, so a partial rewrite would leave it
+ * behind and the verify gate would call the patch ineffective. The
+ * negated form folds the `not` in one edit so the gate's re-run sees the
+ * final form directly.
+ */
+
+// A bounded expression for E721's operands. Subscripts are allowed
+// (`list[int]`), but a nested bracket is refused rather than mis-anchored:
+// the comparison-family `CMP_EXPR`'s `[^\]\n]*` would truncate
+// `dict[str, list[int]]` at the inner `[`, and `isinstance(x, dict)` plus a
+// dangling `[str, list[int]]` would be a corrupt line. `[^\[\]\n]*` refuses
+// the whole shape instead.
+const CMP721_EXPR = '[A-Za-z_][\\w.]*(?:\\[[^\\[\\]\\n]*\\]|\\([^()\\n]*\\))*';
+
+// The end guard closes the matched span: the next character must not
+// extend it as a word or attribute (`int` inside `ints`, `type(y)` inside
+// `type(y).attr`). `\b` would not do — after `)` or `]` it never fires at
+// end-of-string, and between two non-word chars it cannot see a following
+// `and`. The tail guard is the chain guard plus a truncation guard: a `[`
+// or `(` right after the span means it was cut short by nested brackets or
+// calls — refuse the rewrite rather than corrupt the line.
+const CMP721_END = '(?![\\w.])';
+const CMP721_TAIL = '(?!\\s*(?:\\[|\\(|==|!=|<=|>=|<|>|is\\b|in\\b))';
+
+// `[not] type(a) (==|!=) T` → isinstance(a, T) / not isinstance(a, T). The
+// `\b` before every name anchor is what keeps the match from starting inside
+// a longer identifier (`type(x) == type(y)` must not be re-matched as
+// `ype(x) == type(y)` by scanning one char in). The name side is not itself
+// a type() call (that shape is the identity family below) and never a
+// keyword: `type(x) == None` would become the TypeError isinstance(x, None).
+const EQ_TYPE_FWD = new RegExp(
+  `(?<neg>\\bnot\\s+)?\\btype\\s*\\(\\s*(?<arg>${CMP721_EXPR})\\s*\\)\\s*(?<op>==|!=)\\s*(?<rhs>\\b(?!type\\s*\\()${CMP721_EXPR})${CMP721_END}${CMP721_TAIL}`,
+);
+const EQ_TYPE_REV = new RegExp(
+  `(?<neg>\\bnot\\s+)?(?<lhs>\\b(?!type\\s*\\()${CMP721_EXPR})\\s*(?<op>==|!=)\\s*\\btype\\s*\\(\\s*(?<arg>${CMP721_EXPR})\\s*\\)${CMP721_END}${CMP721_TAIL}`,
+);
+// `type(a) == type(b)` — both sides are type objects, so identity is exactly
+// equivalent, and it is the form the rule's own message offers.
+const EQ_TYPE_BOTH = new RegExp(
+  `(?<neg>\\bnot\\s+)?\\btype\\s*\\(\\s*(?<a>${CMP721_EXPR})\\s*\\)\\s*(?<op>==|!=)\\s*\\btype\\s*\\(\\s*(?<b>${CMP721_EXPR})\\s*\\)${CMP721_END}${CMP721_TAIL}`,
+);
+
+const E721_RATIONALE =
+  "type comparison with ==/!= — using isinstance() (or the identity test " +
+  "when both sides are type() calls), as E721 asks.";
+
+function cmpIsinstanceRepl(m: RegExpExecArray, guards: CmpGuard[], line: string): string {
+  const g = m.groups!;
+  if (guards.some((k) => CMP_OPERAND_KEYWORDS.has(g[k] ?? ''))) return m[0];
+  if (CMP_PRECEDING.test(line.slice(0, m.index))) return m[0];
+  const negative = (g.op === '!=') !== !!g.neg;
+  const inner = `isinstance(${g.arg}, ${g[guards[0]]})`;
+  return negative ? `not ${inner}` : inner;
+}
+
+function cmpIdentityRepl(m: RegExpExecArray, guards: CmpGuard[], line: string): string {
+  const g = m.groups!;
+  if (CMP_PRECEDING.test(line.slice(0, m.index))) return m[0];
+  const negative = (g.op === '!=') !== !!g.neg;
+  return `type(${g.a}) ${negative ? 'is not' : 'is'} type(${g.b})`;
+}
+
+function typeComparisonPatches(finding: Finding, sourceRoot: string): Patch[] {
+  if (!finding.file || !finding.line) return [];
+  const text = readFileSync(finding.file, 'utf8');
+  const lines = text.split('\n');
+  const idx = finding.line - 1;
+  const line = lines[idx] ?? '';
+  if (idx < 0 || idx >= lines.length) return [];
+
+  const specs = [
+    { re: EQ_TYPE_FWD, guards: ['rhs'] as CmpGuard[], identity: false },
+    { re: EQ_TYPE_REV, guards: ['lhs'] as CmpGuard[], identity: false },
+    { re: EQ_TYPE_BOTH, guards: [] as CmpGuard[], identity: true },
+  ];
+
+  let out = line;
+  for (const { re, guards, identity } of specs) {
+    const before = out;
+    out = rewriteAll(before, re, (m) =>
+      identity ? cmpIdentityRepl(m, guards, before) : cmpIsinstanceRepl(m, guards, before));
+  }
+  if (out === line) return [];
+  return uniqueOrEmpty(finding.file, text, line, out, E721_RATIONALE);
 }
 
 // -------------------------------------------------------------- test generation (T001)

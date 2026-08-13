@@ -73,6 +73,10 @@ def propose_patches(finding: dict, source_root: str):
         return unused_rust_import_patches(finding, source_root)
     if code in ("T201", "T202", "T203"):
         return best_practice_patches(finding, source_root, code)
+    if code in ("E711", "E712", "E713", "E714"):
+        return comparison_style_patches(finding, source_root, code)
+    if code == "E721":
+        return type_comparison_patches(finding, source_root)
     if code == "T001":
         return testgen_patches(finding, source_root)
     if code == "T105":
@@ -363,6 +367,231 @@ def best_practice_patches(finding: dict, source_root: str, kind: str):
         replace = m.group(1) + m.group(2)
         rationale = "'in d.keys()' — the keys view is redundant; 'in d' is equivalent."
     return unique_or_empty(file, text, find, replace, rationale)
+
+
+# ------------------------------------------------------- comparison style (E711-E714)
+
+# A bounded expression: identifiers, dotted names, subscripts and calls with
+# simple non-nested arguments. Anything more complex ends the match, so a
+# shape the rule cannot anchor exactly yields no patch instead of a wrong one.
+_EXPR = r"[A-Za-z_][\w.]*(?:\[[^\]\n]*\]|\([^()\n]*\))*"
+
+# Operands that must never be captured: in `not x is not y` the second `not`
+# is an operator, not the right operand, and rewriting it would corrupt the
+# line. Refusing beats guessing.
+_OPERAND_KEYWORDS = {"not", "and", "or", "in", "is", "None", "True", "False"}
+
+# A comparison operator immediately after (or before) the matched span means
+# a chained comparison (`a == None == b`, `a == x == None`) — the rewrite
+# would corrupt the chain, so both sides are refused.
+_CHAINED = r"(?!\s*(?:==|!=|<=|>=|<|>|is\b|in\b))"
+_PRECEDING_CMP = re.compile(r"(?:==|!=|<=|>=|<|>|is\b|in\b)\s*$")
+
+# `[not] <expr> (==|!=) None` and the mirror. E711 is reported for Eq/NotEq
+# against None; the negated form must land directly on `is not`/`is`, or the
+# verify gate's re-run would surface the half-rewritten `not x is None` as a
+# brand-new E714 and regress the patch.
+_EQ_NONE_FWD = re.compile(
+    rf"(?P<neg>\bnot\s+)?(?P<left>{_EXPR})\s*(?P<op>==|!=)\s*(?P<right>None)\b{_CHAINED}"
+)
+_EQ_NONE_REV = re.compile(
+    rf"(?P<neg>\bnot\s+)?(?P<left>None)\s*(?P<op>==|!=)\s*(?P<right>{_EXPR})\b{_CHAINED}"
+)
+
+# Same shapes for E712 against True/False. E712 fires on `==`/`!=` only —
+# `is True` is the form the finding's own message recommends.
+_EQ_BOOL_FWD = re.compile(
+    rf"(?P<neg>\bnot\s+)?(?P<left>{_EXPR})\s*(?P<op>==|!=)\s*(?P<right>True|False)\b{_CHAINED}"
+)
+_EQ_BOOL_REV = re.compile(
+    rf"(?P<neg>\bnot\s+)?(?P<left>True|False)\s*(?P<op>==|!=)\s*(?P<right>{_EXPR})\b{_CHAINED}"
+)
+
+# `not x in y` → `x not in y` (E713) and `not x is y` → `x is not y` (E714).
+# The `not` is mandatory — without it there is nothing to fix.
+_NOT_IN = re.compile(
+    rf"(?P<neg>\bnot\s+)(?P<left>{_EXPR})\s+in\s+(?P<right>{_EXPR})\b{_CHAINED}"
+)
+_NOT_IS = re.compile(
+    rf"(?P<neg>\bnot\s+)(?P<left>{_EXPR})\s+is\s+(?P<right>{_EXPR})\b{_CHAINED}"
+)
+
+
+_COMPARISON_RATIONALE = {
+    "E711": "comparison to None with ==/!= — using the identity test 'is'/'is not' that was meant.",
+    "E712": "comparison to a bool literal with ==/!= — using the identity test 'is'/'is not' the linter asks for.",
+    "E713": "'not x in y' — using the direct membership test 'x not in y'.",
+    "E714": "'not x is y' — using the direct identity test 'x is not y'.",
+}
+
+
+def _eq_repl(m: re.Match, guards, line: str):
+    if any(m.group(g) in _OPERAND_KEYWORDS for g in guards):
+        return m.group(0)
+    # A comparison operator right before the match means the match is the
+    # tail of a chained comparison (`a == x == None`) — refuse the rewrite.
+    if _PRECEDING_CMP.search(line[:m.start()]):
+        return m.group(0)
+    op = m.group("op")
+    neg = bool(m.group("neg"))
+    new = "is" if (op == "==") != neg else "is not"
+    return f"{m.group('left')} {new} {m.group('right')}"
+
+
+def _not_repl(m: re.Match, guards, token: str, line: str):
+    if any(m.group(g) in _OPERAND_KEYWORDS for g in guards):
+        return m.group(0)
+    if _PRECEDING_CMP.search(line[:m.start()]):
+        return m.group(0)
+    return f"{m.group('left')} {token} {m.group('right')}"
+
+
+def comparison_style_patches(finding: dict, source_root: str, code: str):
+    """The pyflakes/ruff comparison family. E711 (`x == None`) and E712
+    (`x == True`) want identity — `is`/`is not` — not equality; E713
+    (`not x in y`) wants the direct `not in`; E714 (`not x is y`) wants
+    `is not`. Each rewrite is anchored on the reported line and preserves
+    the rest of it verbatim, and every occurrence on the line is rewritten
+    together — ruff reports `x == None and y == None` as *one* finding, so
+    a partial rewrite would leave the same fingerprint behind and the verify
+    gate would correctly call it ineffective. E712's `is True` rewrite
+    changes semantics for non-bool operands (`1 == True` is True, `1 is
+    True` is not) — it is exactly the form the linter's own message
+    recommends, and the verify gate's checks are the backstop."""
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    text = _read(file)
+    lines = text.split("\n")
+    idx = line - 1
+    if not 0 <= idx < len(lines):
+        return []
+    line_text = lines[idx]
+
+    if code == "E711":
+        specs = ((_EQ_NONE_FWD, ("left",), _eq_repl), (_EQ_NONE_REV, ("right",), _eq_repl))
+    elif code == "E712":
+        specs = ((_EQ_BOOL_FWD, ("left",), _eq_repl), (_EQ_BOOL_REV, ("right",), _eq_repl))
+    elif code == "E713":
+        specs = ((_NOT_IN, ("left", "right"), lambda m, g, ln: _not_repl(m, g, "not in", ln)),)
+    elif code == "E714":
+        specs = ((_NOT_IS, ("left", "right"), lambda m, g, ln: _not_repl(m, g, "is not", ln)),)
+    else:
+        return []
+
+    out = line_text
+    for pat, guards, repl in specs:
+        out = pat.sub(lambda m, g=guards, r=repl, ln=out: r(m, g, ln), out)
+    if out == line_text:
+        return []
+    return unique_or_empty(file, text, line_text, out, _COMPARISON_RATIONALE[code])
+
+
+# ------------------------------------------------------- type comparison (E721)
+
+# A bounded expression for E721's operands. Subscripts are allowed
+# (`list[int]`), but a nested bracket is refused rather than mis-anchored:
+# the comparison-family `_EXPR`'s `[^\]\n]*` would truncate
+# `dict[str, list[int]]` at the inner `[`, and `isinstance(x, dict)` plus a
+# dangling `[str, list[int]]` would be a corrupt line. `[^\[\]\n]*` refuses
+# the whole shape instead.
+_E721_EXPR = r"[A-Za-z_][\w.]*(?:\[[^\[\]\n]*\]|\([^()\n]*\))*"
+
+# The end guard closes the matched span: the next character must not
+# extend it as a word or attribute (`int` inside `ints`, `type(y)` inside
+# `type(y).attr`). `\b` would not do — after `)` or `]` it never fires at
+# end-of-string, and between two non-word chars it cannot see a following
+# `and`. The tail guard is the chain guard plus a truncation guard: a `[`
+# or `(` right after the span means it was cut short by nested brackets or
+# calls — refuse the rewrite rather than corrupt the line.
+_E721_END = r"(?![\w.])"
+_E721_TAIL = r"(?!\s*(?:\[|\(|==|!=|<=|>=|<|>|is\b|in\b))"
+
+# `[not] type(a) (==|!=) T` → isinstance(a, T) / not isinstance(a, T). The
+# `\b` before every name anchor is what keeps the match from starting inside
+# a longer identifier (`type(x) == type(y)` must not be re-matched as
+# `ype(x) == type(y)` by scanning one char in). The name side is not itself
+# a type() call (that shape is the identity family below) and never a
+# keyword: `type(x) == None` would become the TypeError isinstance(x, None).
+_EQ_TYPE_FWD = re.compile(
+    rf"(?P<neg>\bnot\s+)?\btype\s*\(\s*(?P<arg>{_E721_EXPR})\s*\)\s*"
+    rf"(?P<op>==|!=)\s*(?P<rhs>\b(?!type\s*\(){_E721_EXPR}){_E721_END}{_E721_TAIL}"
+)
+_EQ_TYPE_REV = re.compile(
+    rf"(?P<neg>\bnot\s+)?(?P<lhs>\b(?!type\s*\(){_E721_EXPR})\s*"
+    rf"(?P<op>==|!=)\s*\btype\s*\(\s*(?P<arg>{_E721_EXPR})\s*\){_E721_END}{_E721_TAIL}"
+)
+
+# `type(a) == type(b)` — both sides are type objects, so identity is exactly
+# equivalent, and it is the form the rule's own message offers.
+_EQ_TYPE_BOTH = re.compile(
+    rf"(?P<neg>\bnot\s+)?\btype\s*\(\s*(?P<a>{_E721_EXPR})\s*\)\s*"
+    rf"(?P<op>==|!=)\s*\btype\s*\(\s*(?P<b>{_E721_EXPR})\s*\){_E721_END}{_E721_TAIL}"
+)
+
+_E721_RATIONALE = (
+    "type comparison with ==/!= — using isinstance() (or the identity test "
+    "when both sides are type() calls), as E721 asks."
+)
+
+
+def _isinstance_repl(m: re.Match, guards, line: str):
+    # guards is the *name* side ('rhs' fwd / 'lhs' rev) — a keyword there
+    # (`type(x) == None`) would become the TypeError isinstance(x, None).
+    if any(m.group(g) in _OPERAND_KEYWORDS for g in guards):
+        return m.group(0)
+    if _PRECEDING_CMP.search(line[:m.start()]):
+        return m.group(0)
+    negative = (m.group("op") == "!=") != bool(m.group("neg"))
+    inner = f"isinstance({m.group('arg')}, {m.group(guards[0])})"
+    return f"not {inner}" if negative else inner
+
+
+def _identity_repl(m: re.Match, guards, line: str):
+    if _PRECEDING_CMP.search(line[:m.start()]):
+        return m.group(0)
+    negative = (m.group("op") == "!=") != bool(m.group("neg"))
+    return f"type({m.group('a')}) {'is not' if negative else 'is'} type({m.group('b')})"
+
+
+def type_comparison_patches(finding: dict, source_root: str):
+    """`type(x) == T` — E721. The rule's name says it: do not compare types,
+    use isinstance(). For type-vs-name shapes the rewrite is
+    `isinstance(x, T)` / `not isinstance(x, T)`; when both sides are type()
+    calls the only sensible rewrite is the identity test `type(a) is
+    type(b)` — exactly equivalent, and the form the rule's own message
+    offers. isinstance changes semantics for subclasses (a subclass
+    instance passes isinstance but fails `type() ==`) — it is what the rule
+    asks for, and the verify gate's checks are the backstop, exactly as for
+    E712's `is True`. Every occurrence on the line is rewritten together:
+    ruff reports `type(a) == int and type(b) == str` as two findings with
+    one message, hence one fingerprint, so a partial rewrite would leave it
+    behind and the verify gate would call the patch ineffective. The
+    negated form folds the `not` in one edit so the gate's re-run sees the
+    final form directly."""
+    file = finding.get("file")
+    line = finding.get("line")
+    if not file or not line:
+        return []
+    text = _read(file)
+    lines = text.split("\n")
+    idx = line - 1
+    if not 0 <= idx < len(lines):
+        return []
+    line_text = lines[idx]
+
+    specs = (
+        (_EQ_TYPE_FWD, ("rhs",), _isinstance_repl),
+        (_EQ_TYPE_REV, ("lhs",), _isinstance_repl),
+        (_EQ_TYPE_BOTH, (), _identity_repl),
+    )
+    out = line_text
+    for pat, guards, repl in specs:
+        out = pat.sub(lambda m, g=guards, r=repl, ln=out: r(m, g, ln), out)
+    if out == line_text:
+        return []
+    return unique_or_empty(file, text, line_text, out, _E721_RATIONALE)
 
 
 # -------------------------------------------------------------- test generation (T001)

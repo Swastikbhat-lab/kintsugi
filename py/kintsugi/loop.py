@@ -24,6 +24,7 @@ from .ledger import Ledger, ledger_path_for
 from .patch import apply_edits
 from .propose import propose_patches
 from .provider import CRITIC_QUESTIONS, create_provider
+from .tools import ToolRunner
 from .risk import by_risk, suppress_findings
 from .tracer import Tracer, cost_usd
 from .verify import verify_patch
@@ -232,15 +233,48 @@ class Loop:
 
     # ------------------------------------------------------------- process
 
+    def _proposer_context(self, finding, graph):
+        """What the harness already knows about this finding, handed to the
+        model through the prompt: the ledger's prior attempts at this exact
+        fingerprint, and how many modules import its file. The model cannot
+        touch these — they are rendered text — but it no longer has to
+        rediscover dead ends or guess at blast radius."""
+        ctx = {}
+        history = self.ledger.history(finding["fingerprint"])
+        if history:
+            ctx["ledger"] = [
+                {
+                    "outcome": a["outcome"],
+                    "patch": {
+                        "find": (a.get("patch") or {}).get("find"),
+                        "replace": (a.get("patch") or {}).get("replace"),
+                    },
+                }
+                for a in history
+            ]
+        scope, importers = scope_of(graph, finding["file"])
+        if scope == "shared":
+            ctx["importers"] = importers
+        return ctx
+
     def _process(self, target, checks, source_root, baseline):
         # Rules first: free, instant, and proven on these classes.
         candidates = propose_patches(target, source_root)
+
+        # Blast radius is decided from what the file is — a repair that
+        # touches a module other files import changes code the loop is not
+        # looking at, and the verify gate cannot catch that. It is computed
+        # *before* the model is consulted so the proposer can see it too
+        # (model-callable context, borrowed from NOOA).
+        graph = build_import_graph(source_root)
 
         # The model is consulted only for what the rules could not reach.
         if not candidates and self.provider:
             self.say("verify", f"No rule covers {target.get('code') or target['check']} — asking {self.provider.name}")
             try:
-                candidates = self.provider.propose(target, source_root)
+                candidates = self.provider.propose(
+                    target, source_root, self._proposer_context(target, graph),
+                    ToolRunner(source_root, graph))
                 self.say("verify", f"{self.provider.name} proposed {len(candidates)} candidate(s)")
                 usage = getattr(self.provider, "last_usage", None) or {}
                 self.tracer.generation(
@@ -258,10 +292,6 @@ class Loop:
                 self.say("verify", f"Model proposer failed: {err}")
                 candidates = []
 
-        # Blast radius is decided now, from what the file is — a repair that
-        # touches a module other files import changes code the loop is not
-        # looking at, and the verify gate cannot catch that.
-        graph = build_import_graph(source_root)
         for p in candidates:
             scope, importers = scope_of(graph, p["file"])
             p["scope"] = scope

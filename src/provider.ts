@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Finding, Patch } from './types.js';
+import type { ToolRunner } from './tools.js';
 
 /**
  * The model seam.
@@ -15,10 +16,31 @@ import type { Finding, Patch } from './types.js';
  * proposal costs one reverted patch and one ledger entry, because something
  * that cannot be argued with checks it afterwards.
  */
+/**
+ * What the harness already knows about a finding, handed to the model
+ * through the prompt: the ledger's prior attempts at this exact fingerprint
+ * and how many modules import its file. Rendered text, never live objects —
+ * the safe half of NOOA's pass-by-reference (see docs/NOOA.md).
+ */
+export interface ProposerContext {
+  ledger?: { outcome: string; patch: { find?: string; replace?: string } }[];
+  importers?: number;
+}
+
 export interface Provider {
   readonly name: string;
-  /** Candidate edits for a finding. An empty array is a valid answer. */
-  propose(finding: Finding, sourceRoot: string): Promise<Patch[]>;
+  /**
+   * Candidate edits for a finding. An empty array is a valid answer.
+   * `tools` lets the model inspect the repo through declared read-only
+   * tools (read_file / grep / importers) before proposing; it can never
+   * execute anything.
+   */
+  propose(
+    finding: Finding,
+    sourceRoot: string,
+    context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<Patch[]>;
   /**
    * Judge a patch on one axis, with no knowledge of who wrote it or why.
    * Providers that cannot judge return `null` and are simply not consulted.
@@ -74,7 +96,15 @@ export class MockProvider implements Provider {
     });
   }
 
-  async propose(finding: Finding, sourceRoot: string): Promise<Patch[]> {
+  async propose(
+    finding: Finding,
+    sourceRoot: string,
+    _context?: ProposerContext,
+    _tools?: ToolRunner,
+  ): Promise<Patch[]> {
+    // Context and tools are accepted and ignored: the mock replays canned
+    // proposals, so there is nothing to contextualize or inspect. The
+    // parameters exist so the loop can call every provider the same way.
     const entry = this.matches(finding);
     if (!entry) return [];
 
@@ -116,10 +146,25 @@ const PATCH_SCHEMA = {
         additionalProperties: false,
       },
     },
+    // A read-only tool request: the engine executes it and returns the
+    // result in the next turn. `patches` stays required (empty while a tool
+    // is being called) so a reply is always one of two shapes.
+    tool: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', enum: ['read_file', 'grep', 'importers'] },
+        args: { type: 'object' },
+      },
+      required: ['name', 'args'],
+    },
   },
   required: ['patches'],
   additionalProperties: false,
 } as const;
+
+/** The proposer's inspection budget: at most this many read-only tool calls
+ * per finding, so a curious model cannot balloon the prompt. */
+const MAX_TOOL_CALLS = 6;
 
 const CRITIC_SCHEMA = {
   type: 'object',
@@ -149,16 +194,85 @@ Rules:
 
 Your patch will be applied and the checks re-run. If the finding does not
 clear, or anything else breaks, the patch is reverted and recorded as a dead
-end — so a plausible-looking guess costs more than an honest abstention.`;
+end — so a plausible-looking guess costs more than an honest abstention.
+
+You may inspect the codebase before proposing. Three read-only tools are
+declared: read_file (read a file, optionally a line range), grep (search
+for a regex), importers (which modules import a file). Paths are relative
+to the source root. A tool can only look — it cannot modify or execute
+anything. To call one, reply {"tool": {"name": ..., "args": {...}},
+"patches": []} and the result is returned to you. At most 6 tool calls per
+finding; when you are ready to answer, reply {"patches": [...]}.`;
+
+/** The model replied but broke the output contract — the one retriable fault
+ * class. API/transport errors are never this: they propagate and the loop
+ * degrades to rules-only, because a broken credential is not a signal to
+ * spend more money. */
+class ContractViolation extends Error {}
+
+const SHAPE_HINT =
+  '\n\nYour reply must be a single JSON object with exactly one key, "patches", ' +
+  'an array of patch objects {file, find, replace, rationale}. Return an ' +
+  'empty array when you have nothing confident.';
+
+/** Render one tool round-trip into the prompt: what was asked and what came
+ * back, so the model's next reply can build on it. Results are bounded
+ * text — never live objects, never code to run. */
+function renderTool(tool: { name?: string; args?: Record<string, unknown> }, result: string): string {
+  const name = tool.name ?? '?';
+  const args = JSON.stringify(tool.args ?? {}, Object.keys(tool.args ?? {}).sort());
+  return (
+    `\n\nTool call: ${name}(${args})\n` +
+    `Result:\n${result}\n` +
+    '\nReply with your next tool call, or your final {"patches": [...]}.'
+  );
+}
+
+/** Render the proposer's context into the prompt: what the ledger remembers
+ * about this finding, and how many modules import its file. Context flows in
+ * through the prompt — declared, inspectable, bounded — never as live
+ * objects or executable code. */
+function contextBlock(context: ProposerContext | undefined, rel: string): string {
+  if (!context) return '';
+  const parts: string[] = [];
+  if (context.importers) {
+    parts.push(
+      `Note: ${rel} is imported by ${context.importers} other module(s). Prefer an ` +
+        'edit confined to this file; a change to a shared file is escalated ' +
+        'and will not be applied automatically.',
+    );
+  }
+  if (context.ledger && context.ledger.length) {
+    const lines = context.ledger.slice(-8).map((a) => {
+      const find = (a.patch.find ?? '').slice(0, 60);
+      const replace = (a.patch.replace ?? '').slice(0, 60);
+      return `- ${a.outcome}: ${JSON.stringify(find)} -> ${JSON.stringify(replace)}`;
+    });
+    parts.push(
+      'The ledger remembers these previous attempts at this exact finding ' +
+        '(outcome: find -> replace):\n' +
+        lines.join('\n') +
+        '\nA shape that already failed will be rejected when applied. ' +
+        'Propose something genuinely different, or nothing.',
+    );
+  }
+  return '\n\n' + parts.join('\n\n');
+}
 
 export class ClaudeProvider implements Provider {
   readonly name = 'claude';
   private client: any;
   private degraded = false;
-  /** The usage the most recent model call reported — the tracer's numbers. */
+  /**
+   * The usage the most recent top-level call (propose/critique) reported,
+   * accumulated across every retry that call made — the tracer's numbers.
+   * Real usage straight from the response, never a guess; a retried call
+   * costs what its retries cost.
+   */
   lastUsage: { inputTokens: number; outputTokens: number } | null = null;
+  private usage: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 };
 
-  private constructor(client: any) {
+  constructor(client: any) {
     this.client = client;
   }
 
@@ -179,6 +293,7 @@ export class ClaudeProvider implements Provider {
   }
 
   async preflight(): Promise<{ ok: boolean; detail: string }> {
+    this.usage = { inputTokens: 0, outputTokens: 0 };
     try {
       const out = await this.call(
         'Reply with the requested JSON and nothing else.',
@@ -199,7 +314,32 @@ export class ClaudeProvider implements Provider {
     }
   }
 
-  private async call(system: string, prompt: string, schema: unknown): Promise<any | null> {
+  /**
+   * One logical model call. A reply that breaks the output contract is
+   * retried with the same prompt up to `attempts` times — typed I/O with
+   * auto-retry, borrowed from NOOA. API errors are never retried here.
+   * `attempts = 1` is the corrective path: the caller already knows the
+   * prompt changed.
+   */
+  private async call(
+    system: string,
+    prompt: string,
+    schema: unknown,
+    attempts = 2,
+  ): Promise<any | null> {
+    let last: Error | null = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await this.callOnce(system, prompt, schema);
+      } catch (err) {
+        if (!(err instanceof ContractViolation)) throw err;
+        last = err;
+      }
+    }
+    throw last;
+  }
+
+  private async callOnce(system: string, prompt: string, schema: unknown): Promise<any | null> {
     const base = {
       model: 'claude-opus-5',
       max_tokens: 16000,
@@ -229,62 +369,155 @@ export class ClaudeProvider implements Provider {
     // Real usage, straight from the response — observability is only worth
     // anything when the numbers are the model's, not a guess.
     const usage = res.usage as { input_tokens?: number; output_tokens?: number } | undefined;
-    this.lastUsage = usage
-      ? { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 }
-      : null;
+    if (usage) {
+      this.usage.inputTokens += usage.input_tokens ?? 0;
+      this.usage.outputTokens += usage.output_tokens ?? 0;
+    }
 
     if (res.stop_reason === 'refusal') return null;
 
     const text = res.content.find((b: any) => b.type === 'text')?.text;
-    if (!text) return null;
+    if (!text) {
+      throw new ContractViolation('model returned no text block despite a schema being set');
+    }
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(
+      throw new ContractViolation(
         `model returned text that was not JSON despite a schema being set: ${text.slice(0, 120)}`,
       );
     }
   }
 
-  async propose(finding: Finding, sourceRoot: string): Promise<Patch[]> {
+  async propose(
+    finding: Finding,
+    sourceRoot: string,
+    context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<Patch[]> {
     const file = finding.file;
     if (!file) return [];
+    this.usage = { inputTokens: 0, outputTokens: 0 };
 
     const { readFile } = await import('node:fs/promises');
     const body = await readFile(file, 'utf8');
     const rel = relative(sourceRoot, file);
-    const prompt = [
-      `Defect (${finding.check}, ${finding.severity}): ${finding.summary}`,
-      ``,
-      `Evidence:`,
-      JSON.stringify(finding.evidence, null, 2),
-      ``,
-      `File: ${rel}`,
-      '```',
-      body.length > 60_000 ? body.slice(0, 60_000) + '\n/* …truncated… */' : body,
-      '```',
-    ].join('\n');
+    const base =
+      [
+        `Defect (${finding.check}, ${finding.severity}): ${finding.summary}`,
+        ``,
+        `Evidence:`,
+        JSON.stringify(finding.evidence, null, 2),
+        ``,
+        `File: ${rel}`,
+        '```',
+        body.length > 60_000 ? body.slice(0, 60_000) + '\n/* …truncated… */' : body,
+        '```',
+      ].join('\n') + contextBlock(context, rel);
 
-    const parsed = await this.call(SYSTEM, prompt, PATCH_SCHEMA);
-    if (!parsed?.patches) return [];
+    // The inspection loop: the model may call declared read-only tools
+    // (read_file, grep, importers), one per reply, and each result is
+    // appended to the prompt as text. The loop is bounded, every result is
+    // capped by the runner, and the model can never execute anything — the
+    // safe half of NOOA's pass-by-reference, made callable.
+    const transcript: string[] = [];
+    let prompt = base;
+    let toolCalls = 0;
+    let parsed: any = null;
+    for (;;) {
+      parsed = await this.call(SYSTEM, prompt, PATCH_SCHEMA);
+      const tool = parsed && typeof parsed === 'object' ? (parsed as any).tool : undefined;
+      if (!tool) break;
+      if (toolCalls >= MAX_TOOL_CALLS) {
+        parsed = null;
+        break;
+      }
+      const result = tools
+        ? tools.run(tool.name ?? '', tool.args ?? {})
+        : 'error: no tools available in this run';
+      transcript.push(renderTool(tool, result));
+      prompt = base + transcript.join('');
+      toolCalls++;
+    }
 
-    return parsed.patches
-      .filter((p: any) => {
-        const abs = resolve(sourceRoot, p.file);
-        const relPath = relative(resolve(sourceRoot), abs);
-        return relPath && !relPath.startsWith('..') && body.includes(p.find);
-      })
-      .map((p: any) => ({
+    let patches = parsed && typeof parsed === 'object' ? (parsed as any).patches : undefined;
+    if (!Array.isArray(patches)) {
+      // The server-side schema should make this impossible; a fallback path
+      // that skipped it is still not a reason to ship garbage — one
+      // corrective retry spelling out the exact contract.
+      parsed = await this.call(SYSTEM, prompt + SHAPE_HINT, PATCH_SCHEMA, 1);
+      patches = parsed && typeof parsed === 'object' ? (parsed as any).patches : undefined;
+      if (!Array.isArray(patches)) {
+        this.lastUsage = this.usage;
+        return [];
+      }
+    }
+
+    let { kept, rejected } = ClaudeProvider.validatePatches(patches, body, sourceRoot);
+    if (kept.length === 0 && rejected.length > 0) {
+      // Every proposal broke the one rule the harness can prove — the
+      // anchor must exist verbatim. One corrective retry naming the
+      // failures is worth more than a dead-end ledger entry.
+      const hint =
+        '\n\nYour previous proposal was rejected: every `find` must be text ' +
+        'copied verbatim from the file, appearing in the file. The rejected ' +
+        `anchors: ${rejected.slice(0, 4).join('; ')}`;
+      parsed = await this.call(SYSTEM, prompt + hint, PATCH_SCHEMA, 1);
+      patches = parsed && typeof parsed === 'object' ? (parsed as any).patches : undefined;
+      if (Array.isArray(patches)) {
+        kept = ClaudeProvider.validatePatches(patches, body, sourceRoot).kept;
+      }
+    }
+
+    this.lastUsage = this.usage;
+    return kept;
+  }
+
+  /**
+   * Turn parsed patches into engine patches. Returns `kept` and `rejected`
+   * — `rejected` lists why every proposal was dropped, so a failed call
+   * knows whether a corrective retry is worth it. The only rule enforced
+   * here is the one the harness can *prove*: the anchor must exist verbatim
+   * in the file. Everything else is the verify gate's job, not the prompt's.
+   */
+  private static validatePatches(
+    patches: any[],
+    body: string,
+    sourceRoot: string,
+  ): { kept: Patch[]; rejected: string[] } {
+    const root = resolve(sourceRoot);
+    const kept: Patch[] = [];
+    const rejected: string[] = [];
+    for (const p of patches) {
+      if (!p || typeof p !== 'object') {
+        rejected.push('<non-object patch>');
+        continue;
+      }
+      const find = p.find;
+      if (typeof find !== 'string' || !body.includes(find)) {
+        rejected.push(find ? find.slice(0, 80) : '<empty find>');
+        continue;
+      }
+      const abs = resolve(root, p.file ?? '');
+      const relPath = relative(root, abs);
+      if (!relPath || relPath.startsWith('..')) {
+        rejected.push(`file ${JSON.stringify(p.file)} outside the source root`);
+        continue;
+      }
+      kept.push({
         id: randomUUID().slice(0, 8),
-        file: resolve(sourceRoot, p.file),
-        find: p.find,
-        replace: p.replace,
-        rationale: `${p.rationale} [proposed by claude]`,
+        file: abs,
+        find,
+        replace: p.replace ?? '',
+        rationale: `${p.rationale ?? ''} [proposed by claude]`,
         scope: 'local' as const,
-      }));
+      });
+    }
+    return { kept, rejected };
   }
 
   async critique(patch: Patch, finding: Finding, question: string) {
+    this.usage = { inputTokens: 0, outputTokens: 0 };
     const prompt = [
       `Defect: ${finding.summary}`,
       ``,
@@ -304,6 +537,7 @@ export class ClaudeProvider implements Provider {
       prompt,
       CRITIC_SCHEMA,
     );
+    this.lastUsage = this.usage;
     return parsed ? { verdict: parsed.verdict, reason: parsed.reason } : null;
   }
 }

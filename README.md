@@ -86,15 +86,22 @@ claude plugin install Swastikbhat-lab/kintsugi
 Claude Code (or any agent that reads skills) then knows the loop exists,
 loads the instructions when checks fail, and runs the bundled engine via
 `scripts/run-loop.sh`. The skill is progressive-disclosure shaped: ~100
-
-Install the fleet too — the loop's roles (observer, healer, critic,
-verifier) ship as Claude Code subagents:
+tokens of frontmatter until a failing check triggers it. It ships its own
+agent fleet too — the loop's roles (observer, healer, critic, verifier)
+are Claude Code subagents, bundled at `skills/kintsugi/agents/` and
+installed user-wide with one command:
 
 ```bash
-mkdir -p ~/.claude/agents
-cp -r .claude/agents/kintsugi-*.md ~/.claude/agents/
+~/.claude/skills/kintsugi/scripts/run-loop.sh --install-agents
 ```
-tokens of frontmatter until a failing check triggers it.
+
+Verify any install end-to-end without writing a byte to your repo —
+`--selfcheck` boots the engine, probes the runtimes, and runs the bundled
+fixture through the whole loop in dry mode:
+
+```bash
+~/.claude/skills/kintsugi/scripts/run-loop.sh --selfcheck
+```
 
 ## Any check becomes an observation
 
@@ -121,7 +128,7 @@ proven by re-running the checks.
 **Two engines, one loop.** The orchestrator is TypeScript (agent graph
 concurrency, all languages); the **Python engine** (`py/`) is a faithful
 port that needs no Node runtime at all — discovery, pytest/ruff/go runs,
-the strict parser, the F401/I001/assertion-constant rules, the verify gate,
+the strict parser, the F401/I001/E7/assertion-constant rules, the verify gate,
 the ledger, **watch mode** (polling-based), and the **model proposer**
 (optional `anthropic` SDK, or `--llm-mock` for keyless runs) all run under
 a plain `python` interpreter. A Python-only repo — no `package.json` — is
@@ -133,6 +140,22 @@ contract, so a repo audited by both keeps one memory. That interchangeability
 is enforced by a CI regression test (`py/tests/test_parity.py`) that runs
 *both* engines on the same fixture and asserts identical fingerprints,
 reports, and exit codes, plus one shared ledger across engines.
+
+**What we took from NOOA.** The model seam borrows two ideas from NVIDIA's
+object-oriented-agents framework: **typed I/O with auto-retry** (a reply
+that breaks the output contract is retried with the same prompt, its usage
+accumulated; one corrective re-prompt when every proposed anchor fails) and
+**model-callable context** (the proposer sees the ledger's prior attempts at
+this finding and the file's importer count through the prompt, so it does
+not rediscover dead ends or guess at blast radius — and it can *ask* the
+harness for more through three declared read-only tools, `read_file`,
+`grep`, and `importers`, executed by engine code with results returned as
+bounded text, so the model can look without ever touching a live object or
+running code). We deliberately did
+*not* take code-as-action or live-object pass-by-reference — a model that
+writes code against your repo is a model your verify gate cannot attribute.
+[docs/NOOA.md](docs/NOOA.md) is the full capability map: what fits, what
+does not, and why.
 
 Every toolchain check is gated on a quick availability probe, so a repo
 never gets a check whose tool is missing — a default check that crashes on
@@ -165,6 +188,8 @@ that crashes with no output is a broken harness — reported, never healed.
 | Unsorted import blocks (Python `I001`) | sort them isort-style | rule |
 | Wrong constant behind a failing assertion (Python/Go/Rust `assert_eq!`) | recompute from the assertion's own numbers | rule |
 | `type(x) == T`, `len(x) == 0`, `key in d.keys()` (Python `T201`/`T202`/`T203`) | rewrite to `isinstance`, truthiness, `in d` | rule |
+| `x == None`, `x == True`, `not x in y`, `not x is y` (Python `E711`–`E714`) | rewrite to `is`/`is not`, `not in`, `is not` | rule |
+| `type(x) == T` (Python `E721`) | rewrite to `isinstance(x, T)` — or the identity test when both sides are `type()` calls | rule |
 | Functions with no tests (Python `T001`) | generate a smoke test next to the module, then run it | rule |
 | Hardcoded secrets, shell usage (bandit), C+ complexity (radon), perf anti-patterns, TODOs/prints | — | scored, ranked, surfaced (quarantined with evidence) |
 | Wrong behaviour behind a failing test | rewrite the code | model, then **verified** |
@@ -204,8 +229,10 @@ remembers — and quarantines the sixth. The evidence from a real run is in
 
 ## What's next (honestly)
 
-- **More rule classes** — every mechanically-fixable check (formatting, dead
-  code, deprecations) is one more arm in `src/propose.ts`.
+- **More rule classes** — the comparison-style family (`E711`–`E714`) and
+  type comparison (`E721`) just landed in both engines; every other
+  mechanically-fixable check (formatting, dead code, deprecations) is one
+  more arm in `src/propose.ts`.
 - **A live model run** — the Anthropic seam is built and degrades safely,
   but is only exercised through the mock so far.
 - **A live Langfuse dashboard** — the tracer is proven end-to-end against
