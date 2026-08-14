@@ -427,17 +427,20 @@ class Loop:
         for f in findings:
             candidates = propose_patches(f, source_root)
             if not candidates:
+                f["dryStatus"] = "none"
                 none += 1
                 self.say("diagnose", f"NO PATCH   {f['check']}: {f['summary']}")
                 continue
             scope, _ = scope_of(graph, candidates[0]["file"])
             shared = scope == "shared" and not self.config.get("allowShared")
             if shared:
+                f["dryStatus"] = "escalated"
                 escalated += 1
                 self.say("diagnose", f"ESCALATE   {f['check']}: {f['summary']}")
                 rel = os.path.relpath(candidates[0]["file"], source_root).replace("\\", "/")
                 self.say("diagnose", f"           → {rel} — shared file, not applied automatically")
             else:
+                f["dryStatus"] = "patchable"
                 with_patch += 1
                 self.say("diagnose", f"WOULD PATCH {f['check']}: {f['summary']}")
                 rel = os.path.relpath(candidates[0]["file"], source_root).replace("\\", "/")

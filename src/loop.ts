@@ -570,16 +570,19 @@ export class Loop {
     for (const f of this.state.findings) {
       const cands = await proposePatches(f, this.config.sourceRoot);
       if (!cands.length) {
+        f.dryStatus = 'none';
         none++;
         emit(`NO PATCH   ${f.check}: ${f.summary}`);
         continue;
       }
       const shared = cands[0].scope === 'shared' && !this.config.allowShared;
       if (shared) {
+        f.dryStatus = 'escalated';
         escalated++;
         emit(`ESCALATE   ${f.check}: ${f.summary}`);
         emit(`           → ${relative(this.config.sourceRoot, cands[0].file)} — shared file, not applied automatically`);
       } else {
+        f.dryStatus = 'patchable';
         withPatch++;
         emit(`WOULD PATCH ${f.check}: ${f.summary}`);
         emit(`           → ${relative(this.config.sourceRoot, cands[0].file)} — ${cands[0].rationale}`);

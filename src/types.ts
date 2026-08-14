@@ -26,6 +26,12 @@ export interface Finding {
   code?: string;
   /** Parsed specifics the healer needs to construct a patch. */
   evidence: Record<string, unknown>;
+  /**
+   * Stamped during a dry-run survey: whether a mechanical repair exists for
+   * this finding. Lets a CI report say "repair available" without applying
+   * anything. Unset on live runs, where the attempt record answers instead.
+   */
+  dryStatus?: 'patchable' | 'escalated' | 'none';
 }
 
 // ------------------------------------------------------------- repair

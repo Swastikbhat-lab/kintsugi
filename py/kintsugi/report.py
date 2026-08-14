@@ -21,6 +21,29 @@ def summarise(state: dict, actionable_remaining):
     escalated = [a for a in with_patch if a["patch"]["scope"] == "shared"]
     rejected = [a for a in with_patch if a["patch"]["scope"] != "shared"]
 
+    # A finding that survives to the report answers "was there a repair?" from
+    # the attempt ledger (live runs) or from the dry survey's stamp — the same
+    # vocabulary the TypeScript engine uses.
+    repair_by_fingerprint = {}
+    for a in committed:
+        repair_by_fingerprint[a["fingerprint"]] = "applied"
+    for a in reverted:
+        repair_by_fingerprint[a["fingerprint"]] = "attempted"
+    for a in rejected:
+        repair_by_fingerprint[a["fingerprint"]] = "attempted"
+    for a in escalated:
+        repair_by_fingerprint[a["fingerprint"]] = "escalated"
+    for a in quarantined:
+        repair_by_fingerprint[a["fingerprint"]] = "none"
+
+    findings = []
+    for f in state["findings"]:
+        dry = f.get("dryStatus")
+        # The dry survey says `patchable`; the report says `proposed`.
+        if dry == "patchable":
+            dry = "proposed"
+        findings.append({**f, "repair": dry or repair_by_fingerprint.get(f["fingerprint"], "none")})
+
     return {
         "runId": state["id"],
         "status": state["status"],
@@ -30,6 +53,7 @@ def summarise(state: dict, actionable_remaining):
         "escalated": escalated,
         "rejected": rejected,
         "quarantined": quarantined,
+        "findings": findings,
         "findingsRemaining": len(state["findings"]),
         "actionableRemaining": len(actionable_remaining),
     }
@@ -58,6 +82,25 @@ def summary_lines(s: dict, source_root: str):
     return lines
 
 
+def _finding_json(f: dict, source_root: str) -> dict:
+    """Per-finding detail, key-for-key with the TypeScript engine's report.
+    Keys TS omits (undefined) are omitted here too — the parity test asserts
+    the two JSON reports are identical."""
+    entry = {
+        "check": f["check"],
+        "severity": f["severity"],
+        "summary": f["summary"],
+        "repair": f.get("repair", "none"),
+    }
+    if f.get("file"):
+        entry["file"] = _rel(source_root, f["file"])
+    if f.get("line"):
+        entry["line"] = f["line"]
+    if f.get("code"):
+        entry["code"] = f["code"]
+    return entry
+
+
 def report_json(s: dict, source_root: str):
     return {
         "runId": s["runId"],
@@ -77,6 +120,7 @@ def report_json(s: dict, source_root: str):
             for a in s["escalated"]
         ],
         "quarantined": [{"finding": a["fingerprint"]} for a in s["quarantined"]],
+        "findings": [_finding_json(f, source_root) for f in s["findings"]],
         "findingsRemaining": s["findingsRemaining"],
         "actionableRemaining": s["actionableRemaining"],
     }
