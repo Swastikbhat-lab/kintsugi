@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reviewPullRequest } from '../src/review.js';
 import { stubOctokit, fakeContext, pullRequestPayload, makeReviewCheckout } from './helpers.js';
-import { REVIEW_MARKER } from 'kintsugi/scripts/render-report.mjs';
+import { REVIEW_MARKER } from 'kintsugi-heal/scripts/render-report.mjs';
 
 test('draft PRs are skipped without touching anything', async () => {
   const { octokit, calls } = stubOctokit();

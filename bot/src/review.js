@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderMarkdown, REVIEW_MARKER } from 'kintsugi/scripts/render-report.mjs';
+import { renderMarkdown, REVIEW_MARKER } from 'kintsugi-heal/scripts/render-report.mjs';
 import { checkout, getToken } from './github.js';
 import { installDeps, runEngine } from './engine.js';
 

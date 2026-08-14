@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 
 /** Path to the built engine CLI. Override with KINTSUGI_CLI for a custom build. */
 export function cliPath() {
-  return process.env.KINTSUGI_CLI || require.resolve('kintsugi/dist/cli.js');
+  return process.env.KINTSUGI_CLI || require.resolve('kintsugi-heal/dist/cli.js');
 }
 
 /**

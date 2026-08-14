@@ -1,6 +1,6 @@
 {
-  "name": "kintsugi",
-  "version": "0.2.0",
+  "name": "kintsugi-heal",
+  "version": "0.3.0",
   "description": "A self-healing repair loop for codebases: observes failing checks (tests, typecheck, lint, custom), repairs the ones with a provable fix, verifies every repair by re-running the checks, and quarantines the rest with evidence. Packaged as a Claude skill.",
   "type": "module",
   "license": "MIT",
