@@ -37,7 +37,7 @@ jobs:
           git config user.email "kintsugi[bot]@users.noreply.github.com"
 
       - name: Apply and verify the repairs
-        uses: Swastikbhat-lab/kintsugi@main
+        uses: Swastikbhat-lab/kintsugi@v0.3.0
         with:
           source: .
           dry: 'false'

@@ -31,7 +31,7 @@ jobs:
           if [ -f package.json ]; then npm ci --no-audit --no-fund || true; fi
           if [ -f fixture/package.json ]; then (cd fixture && npm ci --no-audit --no-fund) || true; fi
 
-      - uses: Swastikbhat-lab/kintsugi@main
+      - uses: Swastikbhat-lab/kintsugi@v0.3.0
         id: kintsugi
         with:
           source: .
