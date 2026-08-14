@@ -21,6 +21,11 @@ worked**, and quarantines the rest with evidence attached.
 [![Issues](https://img.shields.io/github/issues/Swastikbhat-lab/kintsugi)](https://github.com/Swastikbhat-lab/kintsugi/issues)
 
 </div>
+<div align="center">
+
+![Kintsugi demo](docs/demo.gif)
+
+</div>
 
 ## The loop
 
