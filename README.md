@@ -10,9 +10,15 @@ ones with a provably correct fix, **re-runs the checks to prove the repair
 worked**, and quarantines the rest with evidence attached.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?logo=typescript&logoColor=white)](#)
-[![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?logo=node.js&logoColor=white)](#)
 [![CI](https://github.com/Swastikbhat-lab/kintsugi/actions/workflows/ci.yml/badge.svg)](https://github.com/Swastikbhat-lab/kintsugi/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?logo=node.js&logoColor=white)](#)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?logo=typescript&logoColor=white)](#)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#)
+[![Claude Skill](https://img.shields.io/badge/Claude%20Skill-ready-D97757)](#)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-ready-2088FF?logo=github-actions&logoColor=white)](#)
+[![Stars](https://img.shields.io/github/stars/Swastikbhat-lab/kintsugi)](https://github.com/Swastikbhat-lab/kintsugi/stargazers)
+[![Contributors](https://img.shields.io/github/contributors/Swastikbhat-lab/kintsugi)](https://github.com/Swastikbhat-lab/kintsugi/graphs/contributors)
+[![Issues](https://img.shields.io/github/issues/Swastikbhat-lab/kintsugi)](https://github.com/Swastikbhat-lab/kintsugi/issues)
 
 </div>
 
@@ -75,6 +81,11 @@ as success.
 mkdir -p ~/.claude/skills
 cp -r skills/kintsugi ~/.claude/skills/kintsugi
 ```
+
+Or run it as a **GitHub App** that reviews pull requests on any repo you
+install it on — no workflow files to copy. Install the app once, get a
+findings comment on every PR, and comment `/kintsugi-fix` to have the
+verified repairs land as a new PR. Setup and deployment in [`bot/`](bot/README.md).
 
 Or install the whole repo as a **Claude Code plugin** — the skill and the
 agent fleet ship inside it:

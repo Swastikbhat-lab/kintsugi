@@ -37,3 +37,19 @@ jobs:
           echo "$OUT" | grep -q "5 committed" || { echo "expected 5 committed fixes"; exit 1; }
           echo "$OUT" | grep -q "1 quarantined" || { echo "expected 1 quarantined finding"; exit 1; }
           rm -rf .kintsugi-ci
+
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install engine + fixture toolchain (the bot's tests run the real engine against the fixture)
+        run: |
+          npm ci
+          cd fixture && npm ci
+      - name: Install the bot
+        run: cd bot && npm ci
+      - name: Bot tests
+        run: cd bot && npm test

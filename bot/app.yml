@@ -1,0 +1,22 @@
+# GitHub App manifest (Probot). Create the app at
+# https://github.com/settings/apps/new?manifest=... — paste this file's
+# content, or use `npx create-probot-app` and swap this manifest in.
+#
+# The app is intentionally installable on ANY repo, not just this one: that
+# is the whole point over the copy-paste workflow.
+
+name: kintsugi
+description: >-
+  Self-healing code review. Audits every pull request with the Kintsugi
+  repair loop (dry run — nothing is written), and on a "/kintsugi-fix"
+  comment applies the verified fixes as a new pull request.
+url: https://github.com/Swastikbhat-lab/kintsugi
+public: false
+default_events:
+  - pull_request
+  - issue_comment
+default_permissions:
+  contents: write
+  issues: write
+  pull_requests: write
+  metadata: read

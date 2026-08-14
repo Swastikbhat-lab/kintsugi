@@ -12,7 +12,10 @@
   },
   "files": [
     "dist",
+    "scripts",
     "README.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
     "LICENSE"
   ],
   "keywords": [

@@ -1,0 +1,22 @@
+{
+  "name": "kintsugi-bot",
+  "version": "0.1.0",
+  "description": "Kintsugi GitHub App (Probot): reviews pull requests with the self-healing repair loop and opens verified-fix PRs on /kintsugi-fix.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "index.js",
+  "scripts": {
+    "start": "probot run ./index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "kintsugi": "file:../",
+    "probot": "^13.4.0"
+  },
+  "devDependencies": {
+    "nock": "^14.0.1"
+  }
+}
