@@ -10,8 +10,34 @@
   "bin": {
     "kintsugi": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "code-repair",
+    "self-healing",
+    "automated-fixing",
+    "typecheck",
+    "lint",
+    "code-quality",
+    "claude-skill",
+    "developer-tools",
+    "ci"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Swastikbhat-lab/kintsugi.git"
+  },
+  "homepage": "https://github.com/Swastikbhat-lab/kintsugi",
+  "bugs": {
+    "url": "https://github.com/Swastikbhat-lab/kintsugi/issues"
+  },
   "scripts": {
     "cli": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "demo": "tsx src/cli.ts --source fixture --config fixture/kintsugi.config.json --llm-mock fixture/proposals/tax-rate.json --state .kintsugi-demo/state.json --quarantined-ok",
