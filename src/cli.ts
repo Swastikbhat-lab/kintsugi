@@ -114,8 +114,11 @@ const ICON = {
   observe: '◎', diagnose: '◆', repair: '✎', verify: '⟳', settle: '■',
 } as const;
 
+// Human-facing progress goes to stderr so stdout stays clean for the
+// machine: with --json, stdout carries exactly the report and nothing else
+// (the GitHub Action pipes it straight into a file).
 const say = (e: LoopEvent) =>
-  console.log(`  ${ICON[e.phase]} [${e.iteration}] ${e.phase.padEnd(8)} ${e.message}`);
+  console.error(`  ${ICON[e.phase]} [${e.iteration}] ${e.phase.padEnd(8)} ${e.message}`);
 
 /** One pass of the loop plus its report. Returns the exit code and the state. */
 async function runOnce(): Promise<{ code: number; state: RunState }> {
@@ -148,10 +151,10 @@ const session = new WatchSession({
     // their events so a repair never re-triggers itself.
     return state.attempts.map((a) => a.patch.file);
   },
-  log: (msg) => console.log(`  ⌁ ${msg}`),
+  log: (msg) => console.error(`  ⌁ ${msg}`),
 });
 
-console.log(`  Watching ${sourceRoot} — Ctrl+C to stop. A change is checked ${debounceMs / 1000}s after it settles.`);
+console.error(`  Watching ${sourceRoot} — Ctrl+C to stop. A change is checked ${debounceMs / 1000}s after it settles.`);
 
 let polling = false;
 const stop = () => {
