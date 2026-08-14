@@ -2,6 +2,8 @@ node_modules/
 dist/
 .kintsugi-demo/
 .kintsugi-ci/
+kintsugi-report.json
+kintsugi-report.md
 *.log
 __pycache__/
 *.pyc

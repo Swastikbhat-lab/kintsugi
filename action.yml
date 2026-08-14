@@ -1,0 +1,98 @@
+name: 'Kintsugi'
+description: >-
+  Run the Kintsugi self-healing repair loop on a codebase. In dry mode (the
+  default) it audits the repo — running its checks, ranking findings, and
+  deciding which have a mechanically correct fix — and writes a JSON report
+  plus a markdown summary without touching a single file. With dry: false it
+  applies the verified repairs and commits each one to a branch.
+branding:
+  icon: 'wrench'
+  color: 'purple'
+inputs:
+  source:
+    description: >-
+      Path to the repo/codebase to audit, relative to the workspace root.
+    required: false
+    default: '.'
+  config:
+    description: >-
+      Path to a kintsugi.config.json (resolved against the source dir).
+      Defaults to <source>/kintsugi.config.json, which the engine auto-wires.
+    required: false
+    default: ''
+  checks:
+    description: 'Comma-separated check names to run (default: all discovered).'
+    required: false
+    default: ''
+  dry:
+    description: 'Survey only — never write to the repo. Always true for reviews.'
+    required: false
+    default: 'true'
+  git:
+    description: 'Commit each verified fix separately (requires a clean tree).'
+    required: false
+    default: 'false'
+  branch:
+    description: 'Branch name for git mode (default kintsugi/fixes).'
+    required: false
+    default: 'kintsugi/fixes'
+  json:
+    description: 'Where to write the JSON report, relative to the source dir.'
+    required: false
+    default: 'kintsugi-report.json'
+  markdown:
+    description: 'Where to write the markdown summary, relative to the source dir.'
+    required: false
+    default: 'kintsugi-report.md'
+outputs:
+  exit-code:
+    description: '0 when nothing actionable remains, 1 when defects remain (dry mode still exits 1 on findings — the step itself never fails).'
+    value: ${{ steps.run.outputs.exit-code }}
+  report:
+    description: 'Path to the JSON report.'
+    value: ${{ steps.run.outputs.report }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Install the Kintsugi engine
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci
+
+    - name: Build the engine
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm run build
+
+    - name: Install the target repo's toolchain (best-effort)
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        if [ -f package.json ]; then npm ci --ignore-scripts --no-audit --no-fund || echo "note: target npm install failed — checks that need it will report as broken harness"; fi
+
+    - name: Run Kintsugi
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      env:
+        KINTSUGI_CONFIG: ${{ inputs.config }}
+        KINTSUGI_CHECKS: ${{ inputs.checks }}
+        KINTSUGI_DRY: ${{ inputs.dry }}
+        KINTSUGI_GIT: ${{ inputs.git }}
+        KINTSUGI_BRANCH: ${{ inputs.branch }}
+        KINTSUGI_JSON: ${{ inputs.json }}
+        KINTSUGI_MD: ${{ inputs.markdown }}
+        KINTSUGI_ENGINE: ${{ github.action_path }}/dist/cli.js
+      run: |
+        set +e
+        ARGS="--source . --json"
+        [ "$KINTSUGI_DRY" = "true" ] && ARGS="$ARGS --dry"
+        [ "$KINTSUGI_GIT" = "true" ] && ARGS="$ARGS --git --branch $KINTSUGI_BRANCH"
+        [ -n "$KINTSUGI_CONFIG" ] && ARGS="$ARGS --config $KINTSUGI_CONFIG"
+        [ -n "$KINTSUGI_CHECKS" ] && ARGS="$ARGS --checks $KINTSUGI_CHECKS"
+        node "$KINTSUGI_ENGINE" $ARGS > "$KINTSUGI_JSON"
+        CODE=$?
+        echo "exit-code=$CODE" >> "$GITHUB_OUTPUT"
+        echo "report=$KINTSUGI_JSON" >> "$GITHUB_OUTPUT"
+        node "${{ github.action_path }}/scripts/render-report.mjs" "$KINTSUGI_JSON" "$KINTSUGI_MD"
+        exit 0

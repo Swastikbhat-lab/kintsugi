@@ -1,0 +1,64 @@
+name: Kintsugi review
+
+# CodeRabbit-style PR review: every pull request is audited by the
+# self-healing loop, and a findings comment is posted (or updated). Dry run
+# only — Kintsugi never writes to the PR branch during a review.
+#
+# Copy this file into any repo to get the same bot. The action resolves from
+# this repository, so PRs to THIS repo are reviewed with the main branch's
+# action — exactly how you want a reviewer to behave.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: kintsugi-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install this repo's toolchain (best-effort, so checks can run)
+        run: |
+          if [ -f package.json ]; then npm ci --no-audit --no-fund || true; fi
+          if [ -f fixture/package.json ]; then (cd fixture && npm ci --no-audit --no-fund) || true; fi
+
+      - uses: Swastikbhat-lab/kintsugi@main
+        id: kintsugi
+        with:
+          source: .
+          json: kintsugi-report.json
+          markdown: kintsugi-report.md
+
+      - name: Post / update the review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const md = fs.readFileSync('kintsugi-report.md', 'utf8');
+            const marker = '<!-- kintsugi-review -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const prev = comments.find((c) => c.body && c.body.includes(marker));
+            const payload = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: md,
+            };
+            if (prev) {
+              await github.rest.issues.updateComment({ ...payload, comment_id: prev.id });
+            } else {
+              await github.rest.issues.createComment(payload);
+            }
