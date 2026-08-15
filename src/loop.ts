@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { relative, resolve } from 'node:path';
+import { relative, resolve, dirname } from 'node:path';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import type {
-  RunConfig, RunState, Finding, Patch, Attempt, LoopEvent, Phase, CheckResult,
+  RunConfig, RunState, Finding, Patch, Edit, Attempt, LoopEvent, Phase, CheckResult,
 } from './types.js';
 import { Ledger, ledgerPathFor } from './ledger.js';
 import { proposePatches } from './propose.js';
@@ -23,7 +24,7 @@ type Emit = (e: LoopEvent) => void;
 const PHASE_OF = (id: string): Phase =>
   id.startsWith('observe') ? 'observe'
   : id === 'reduce' || id === 'diagnose' ? 'diagnose'
-  : id === 'propose' ? 'repair'
+  : id === 'tester' || id === 'propose' ? 'repair'
   : 'verify';
 
 /**
@@ -321,11 +322,100 @@ export class Loop {
       },
     });
 
+    // The import graph is shared by the tester (its read-only tools), the
+    // proposer (blast radius + tools), and nothing else this iteration.
+    const graph = buildImportGraph(sourceRoot);
+
+    // ---- tester: repro-first, before any repair is proposed --------------
+    // The tester writes a failing test that reproduces the target finding,
+    // confirms it is red by running the checks, then deletes it — the repro
+    // rides along with the repair as a create-edit, so the verify gate owns
+    // the whole red→green unit: apply, prove green, commit or revert.
+    nodes.push({
+      id: 'tester',
+      job: 'Write a failing repro test for the target before any repair',
+      dependsOn: ['diagnose'],
+      validate: (o: any) => !!o && typeof o === 'object' && 'repro' in o,
+      run: async ({ deps, emit }) => {
+        const target = (deps.diagnose as any).target as Finding | null;
+        if (!target || !this.provider?.reproduce) return { repro: null };
+        // A dry run surveys; nothing is written, so nothing is reproduced.
+        if (this.config.dryRun) return { repro: null };
+
+        const history = this.ledger.history(target.fingerprint);
+        const { scope, importers } = scopeOf(graph, target.file ?? '');
+        let repro: Edit | null = null;
+        try {
+          const planned = await this.provider.reproduce(
+            target,
+            sourceRoot,
+            {
+              ...(history.length
+                ? {
+                    ledger: history.map((a) => ({
+                      outcome: a.outcome,
+                      patch: { find: a.patch.find, replace: a.patch.replace },
+                    })),
+                  }
+                : {}),
+              ...(scope === 'shared' ? { importers } : {}),
+            },
+            new ToolRunner(sourceRoot, graph),
+          );
+          if (!planned) {
+            emit('Tester: no repro — proposing from the raw finding');
+            return { repro: null };
+          }
+
+          const abs = resolve(sourceRoot, planned.file);
+          const rel = relative(sourceRoot, abs);
+          if (!rel || rel.startsWith('..')) {
+            emit(`Tester: repro ${JSON.stringify(planned.file)} is outside the source root — discarded`);
+            return { repro: null };
+          }
+          if (existsSync(abs)) {
+            emit(`Tester: repro ${rel} already exists — refusing to overwrite`);
+            return { repro: null };
+          }
+
+          // Write, confirm red by running the checks, then delete: the
+          // repro's only job here is to prove the defect is reproducible.
+          // The repair carries it back in as a create-edit, so this pass
+          // never leaves the tree dirty and verify owns the lifecycle.
+          mkdirSync(dirname(abs), { recursive: true });
+          writeFileSync(abs, planned.content);
+          try {
+            const runs = await this._runAll(checks, sourceRoot);
+            const red = runs
+              .flatMap((r) => r.findings)
+              .some((f) => f.file && resolve(f.file) === abs);
+            if (red) {
+              emit(`Tester: repro ${rel} written — red (reproduces the defect)`);
+              repro = { file: abs, find: '', replace: planned.content, create: true };
+            } else {
+              emit('Tester: repro does not reproduce the defect — discarded');
+            }
+          } catch (err) {
+            emit(`Tester: could not confirm red (${(err as Error).message}) — repro discarded`);
+          } finally {
+            try {
+              unlinkSync(abs);
+            } catch {
+              /* already gone */
+            }
+          }
+        } catch (err) {
+          emit(`Tester failed: ${(err as Error).message}`);
+        }
+        return { repro };
+      },
+    });
+
     // ---- propose ---------------------------------------------------------
     nodes.push({
       id: 'propose',
       job: 'Produce candidate patches for the target finding',
-      dependsOn: ['diagnose'],
+      dependsOn: ['diagnose', 'tester'],
       validate: (o: any) => Array.isArray(o?.candidates),
       run: async ({ deps, emit }) => {
         const target = (deps.diagnose as any).target as Finding | null;
@@ -339,7 +429,6 @@ export class Loop {
         // looking at, and the verify gate cannot catch that. It is computed
         // *before* the model is consulted so the proposer can see it too
         // (model-callable context, borrowed from NOOA).
-        const graph = buildImportGraph(sourceRoot);
 
         // The model is consulted only for what the rules could not reach.
         if (candidates.length === 0 && this.provider) {
@@ -421,6 +510,14 @@ export class Loop {
         }
 
         const viable = this.ledger.prioritise(target.fingerprint, candidates);
+
+        // The tester's repro rides along with the repair as a create-edit:
+        // verify applies patch + repro as one unit, so the red→green proof
+        // is committed or reverted together — never a fix without its test.
+        const repro = (deps.tester as any)?.repro as Edit | null | undefined;
+        if (repro && viable.length) {
+          viable[0].also = [repro, ...(viable[0].also ?? [])];
+        }
         return { candidates: viable, target };
       },
     });
@@ -554,12 +651,17 @@ export class Loop {
           // dropped on its own merits rather than as an all-or-nothing blob.
           if (this.config.git) {
             try {
+              // Commit the whole verified unit — the fix and its repro test
+              // together — so the red→green proof travels with the patch.
+              const unit = [patch.file, ...(patch.also?.map((e) => e.file) ?? [])];
+              const reproEdit = (patch.also ?? []).find((e) => e.create);
               const sha = await commitFile(
                 this.config.sourceRoot,
-                patch.file,
+                unit,
                 `Fix ${target.check}: ${target.summary.slice(0, 60)}`,
                 `${target.summary}\n\n${patch.rationale}\n\nVerified by re-running the checks after ` +
-                `the change: the finding cleared and no new finding appeared.`,
+                `the change: the finding cleared and no new finding appeared.` +
+                (reproEdit ? `\nRepro test: ${relative(sourceRoot, reproEdit.file)}` : ''),
               );
               if (sha) emit(`  ${sha} committed to git`);
             } catch (err) {

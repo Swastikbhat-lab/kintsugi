@@ -200,7 +200,7 @@ test('ClaudeProvider: localize without a file returns null', async () => {
   assert.equal(loc, null);
 });
 
-test('MockProvider: localize returns null so keyless runs stay deterministic', async () => {
+test('MockProvider: localize returns null unless the entry declares one', async () => {
   const { MockProvider } = await import('../src/provider.js');
   const mockPath = join(root(), 'mock.json');
   writeFileSync(mockPath, JSON.stringify([{
@@ -208,5 +208,71 @@ test('MockProvider: localize returns null so keyless runs stay deterministic', a
     candidates: [{ file: 'a.ts', find: 'a', replace: 'b', rationale: 'r' }],
   }]));
   const mock = new MockProvider(mockPath);
-  assert.equal(await mock.localize(), null);
+  assert.equal(await mock.localize(finding({ summary: 'x' })), null);
+});
+
+test('MockProvider: replays a canned localization when the entry declares one', async () => {
+  const { MockProvider } = await import('../src/provider.js');
+  const mockPath = join(root(), 'mock-localize.json');
+  writeFileSync(mockPath, JSON.stringify([{
+    match: { code: 'TS2322' },
+    localize: {
+      rootCause: 'the literal is the defect',
+      symbols: ['serverConfig', 'port'],
+      strategy: 'assign the numeric literal',
+      confidence: 'high',
+    },
+    candidates: [{ file: 'a.ts', find: 'a', replace: 'b', rationale: 'r' }],
+  }]));
+  const mock = new MockProvider(mockPath);
+  const loc = await mock.localize(finding({ code: 'TS2322' }));
+  assert.deepEqual(loc, {
+    rootCause: 'the literal is the defect',
+    symbols: ['serverConfig', 'port'],
+    strategy: 'assign the numeric literal',
+    confidence: 'high',
+  });
+  // A different finding class still degrades to null — only the declared
+  // one is replayed.
+  assert.equal(await mock.localize(finding({ code: 'TS2307' })), null);
+});
+
+test('MockProvider: reproduce replays a canned repro only when declared', async () => {
+  const { MockProvider } = await import('../src/provider.js');
+  const mockPath = join(root(), 'mock-repro.json');
+  writeFileSync(mockPath, JSON.stringify([{
+    match: { code: 'TS2322' },
+    repro: { file: 'test/repro.test.ts', content: "import assert from 'node:assert/strict';\n" },
+    candidates: [{ file: 'a.ts', find: 'a', replace: 'b', rationale: 'r' }],
+  }]));
+  const mock = new MockProvider(mockPath);
+  assert.deepEqual(await mock.reproduce(finding({ code: 'TS2322' })), {
+    file: 'test/repro.test.ts',
+    content: "import assert from 'node:assert/strict';\n",
+  });
+  // A class the entry does not declare has no repro — the loop proposes as before.
+  assert.equal(await mock.reproduce(finding({ code: 'TS2307' })), null);
+});
+
+test('ClaudeProvider: reproduce returns the test from a valid reply', async () => {
+  const root = makeRepo({ 'src/tax.py': 'def apply_tax(amount):\n    return amount\n' });
+  const provider = new ClaudeProvider(new FakeClient([
+    new FakeRes(JSON.stringify({
+      file: 'test/repro.test.ts',
+      content: "import assert from 'node:assert/strict';\nassert.equal(apply_tax(100), 10);\n",
+    })),
+  ]) as any);
+  const repro = await provider.reproduce(finding({ file: join(root, 'src/tax.py') }), root);
+  assert.deepEqual(repro, {
+    file: 'test/repro.test.ts',
+    content: "import assert from 'node:assert/strict';\nassert.equal(apply_tax(100), 10);\n",
+  });
+});
+
+test('ClaudeProvider: reproduce abstains with null when it returns no test', async () => {
+  const root = makeRepo({ 'src/tax.py': 'x = 1\n' });
+  const provider = new ClaudeProvider(new FakeClient([
+    new FakeRes(JSON.stringify({ file: '', content: '' })),
+  ]) as any);
+  assert.equal(await provider.reproduce(finding({ file: join(root, 'src/tax.py') }), root), null);
 });

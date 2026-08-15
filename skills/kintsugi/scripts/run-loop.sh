@@ -83,8 +83,9 @@ is_python_repo() {
   return 1
 }
 
-# --install-agents: ship the observer/healer/critic/verifier subagents into
-# the user-level Claude Code agents dir, so the loop can be driven by hand.
+# --install-agents: ship the nine-role fleet (observer, researcher,
+# planner, tester, healer, critic, verifier, checker, overseer) into the
+# user-level Claude Code agents dir, so the loop can be driven by hand.
 # The fleet lives in the skill dir (`agents/`, the skill-only layout) or in
 # the engine checkout (`.claude/agents/`, the plugin layout).
 if [[ " $* " == *" --install-agents "* ]]; then
@@ -97,8 +98,8 @@ if [[ " $* " == *" --install-agents "* ]]; then
   [[ -f "$AGENT_SRC/kintsugi-observer.md" ]] || { echo "kintsugi: agent definitions not found at $AGENT_SRC" >&2; exit 1; }
   mkdir -p "$HOME/.claude/agents"
   cp "$AGENT_SRC"/kintsugi-*.md "$HOME/.claude/agents/"
-  echo "kintsugi: installed the fleet (observer, healer, critic, verifier) → $HOME/.claude/agents/" >&2
-  echo "kintsugi: drive it by hand — ask kintsugi-observer to run a check, kintsugi-healer to propose a repair, kintsugi-verifier to apply and prove it." >&2
+  echo "kintsugi: installed the fleet (observer, researcher, planner, tester, healer, critic, verifier, checker, overseer) → $HOME/.claude/agents/" >&2
+  echo "kintsugi: drive it by hand — ask kintsugi-researcher to localize a defect, kintsugi-tester to write its repro, kintsugi-healer to propose a repair, kintsugi-verifier to apply and prove it." >&2
   exit 0
 fi
 

@@ -69,24 +69,26 @@ export async function useBranch(sourceRoot: string, name: string): Promise<void>
 }
 
 /**
- * Commit exactly one file. Paths are passed after `--` so a filename can
- * never be read as a revision, and only this path is staged — a concurrent
- * edit elsewhere in the tree is not ours to sweep up.
+ * Commit one file, or a verified unit of files (a fix and its repro test).
+ * Paths are passed after `--` so a filename can never be read as a
+ * revision, and only these paths are staged — a concurrent edit elsewhere
+ * in the tree is not ours to sweep up.
  */
 export async function commitFile(
   sourceRoot: string,
-  file: string,
+  files: string | string[],
   subject: string,
   body: string,
 ): Promise<string | null> {
-  const rel = relative(resolve(sourceRoot), resolve(file)).replace(/\\/g, '/');
-  await git(sourceRoot, ['add', '--', rel]);
+  const rels = (Array.isArray(files) ? files : [files])
+    .map((f) => relative(resolve(sourceRoot), resolve(f)).replace(/\\/g, '/'));
+  await git(sourceRoot, ['add', '--', ...rels]);
 
   // Nothing staged means the patch was reverted before we got here.
-  const staged = await git(sourceRoot, ['diff', '--cached', '--name-only', '--', rel]);
+  const staged = await git(sourceRoot, ['diff', '--cached', '--name-only', '--', ...rels]);
   if (!staged) return null;
 
-  await git(sourceRoot, ['commit', '-q', '-m', subject, '-m', body, '--', rel]);
+  await git(sourceRoot, ['commit', '-q', '-m', subject, '-m', body, '--', ...rels]);
   return git(sourceRoot, ['rev-parse', '--short', 'HEAD']);
 }
 

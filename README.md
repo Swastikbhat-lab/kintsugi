@@ -38,7 +38,7 @@ flowchart LR
     D -->|"anything else ✗"| F["revert, record in the ledger"]
 ```
 
-Five phases, one creative step. **observe** runs any check command and turns
+Five phases, one creative phase. **observe** runs any check command and turns
 its output into typed findings — `tsc` errors, TAP test failures, plain
 `path: message` lines from your own scripts. **diagnose** ranks and consults
 the ledger, which remembers every `fingerprint → patch → outcome` so dead
@@ -64,7 +64,13 @@ Point it at a real repo — from anywhere, once the skill is installed:
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo> --dry    # survey: what WOULD it fix? writes nothing
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo>          # rules-only, every patch verified
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo> --watch   # keep repairing as it drifts
+~/.claude/skills/kintsugi/scripts/run-loop.sh --source <your-repo> --git --push   # commit verified fixes on a branch, then push it
 ```
+
+`--git` commits each verified fix on its own branch (it requires a clean
+tree, so the loop's edits never mix with yours — review them with `git log
+-p`); `--push` pushes that branch after the run, the pusher role, so the
+verified fixes are one PR away.
 
 `--watch` keeps the loop resident: it watches the repo for changes and runs a
 pass a couple of seconds after each one settles, so a defect that drifts
@@ -103,9 +109,10 @@ Claude Code (or any agent that reads skills) then knows the loop exists,
 loads the instructions when checks fail, and runs the bundled engine via
 `scripts/run-loop.sh`. The skill is progressive-disclosure shaped: ~100
 tokens of frontmatter until a failing check triggers it. It ships its own
-agent fleet too — the loop's roles (observer, healer, critic, verifier)
-are Claude Code subagents, bundled at `skills/kintsugi/agents/` and
-installed user-wide with one command:
+agent fleet too — the loop's roles (observer, researcher, planner,
+tester, healer, critic, verifier, checker, overseer) are Claude Code
+subagents, bundled at `skills/kintsugi/agents/` and installed user-wide
+with one command:
 
 ```bash
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --install-agents
@@ -227,13 +234,34 @@ that crashes with no output is a broken harness — reported, never healed.
 - **Loop forever.** A finding with no untried candidates is quarantined with
   evidence for a human.
 
-## Many agents, one serial tail
+## The agent team
 
-Each iteration deploys a fleet: observer agents run checks concurrently,
-three critic agents review the patch from fresh contexts in parallel, and a
-single serial tail applies and verifies — because two patches applied at
-once destroy the verify step's ability to say which one caused what. See
+Each iteration deploys a small fleet of specialized roles. The loop's graph
+runs them in dependency order — observers fan out concurrently, the model
+seam steps run serially, three critic agents review the patch from fresh
+contexts in parallel, and a single serial tail applies and verifies,
+because two patches applied at once destroy the verify step's ability to
+say which one caused what. See
 [skills/kintsugi/GRAPH.md](skills/kintsugi/GRAPH.md).
+
+| Role | Phase | What it does | In the engine |
+|---|---|---|---|
+| **observer** | observe | Runs one check; turns its output into typed findings | one graph node per check, concurrent |
+| **researcher** | repair | Localizes the defect to the symbol and call chain that actually cause it — a file is where the symptom appears, a symbol is where the defect lives | `provider.localize()`, feeds the proposer |
+| **planner** | repair | Turns the localization into a repair strategy and checks the blast radius before anyone codes | returned with the localization |
+| **tester** | repair | Writes a failing repro test *before any repair* and confirms it is red — the repair's only job is to turn it green | `provider.reproduce()`, red-confirmed by re-running the checks |
+| **healer** | repair | Proposes the smallest exact edit — rules first, a model only when no rule reaches | rules in `src/propose.ts`, then the model seam |
+| **critic** | verify | Reviews the patch from three fresh angles: fixes the right thing? collateral damage? valid edit? | three concurrent graph nodes, majority vote |
+| **verifier** | verify | Applies the patch and re-runs the checks: kept only if the finding is gone *and* nothing new appeared | the serial tail, `verifyPatch()` |
+| **checker** | settle | One final whole-tree pass after all repairs — catches interactions between individually-verified fixes | `finalCheck()` after the loop |
+| **overseer** | settle | The only role with the whole run: decides converge, escalate, or stop | the loop's settle + ledger |
+
+Every role is also a Claude Code subagent, bundled at
+`skills/kintsugi/agents/` and installed with `--install-agents`. The model
+seam (researcher, planner, tester) only engages when the mechanical rules
+can't reach a finding — rules are free, deterministic, and proven; the
+model handles what they can't, and every model proposal still has to pass
+the same mechanical gate.
 
 ## See it happen
 

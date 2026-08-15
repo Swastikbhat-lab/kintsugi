@@ -27,6 +27,18 @@ export interface ProposerContext {
   importers?: number;
 }
 
+/**
+ * The tester's output: one new test file that fails on the current tree
+ * and reproduces the finding — the red half of red-green. Written before
+ * any repair is proposed, so the repair's only job is to turn it green.
+ */
+export interface ReproTest {
+  /** Path relative to the source root where the test goes. */
+  file: string;
+  /** Full content of the test file. */
+  content: string;
+}
+
 export interface Provider {
   readonly name: string;
   /**
@@ -61,6 +73,20 @@ export interface Provider {
     confidence: 'high' | 'medium' | 'low';
   } | null>;
   /**
+   * The tester step: write a failing repro test for the finding *before*
+   * any repair is proposed. Empirically (SWE-bench agent studies) a
+   * correct reproduction is what separates a fix from a guess — the repro
+   * is red on the broken tree, the repair must turn it green, and the
+   * verify gate proves both halves. Providers that cannot write a repro
+   * return `null` and the loop proposes as before.
+   */
+  reproduce?(
+    finding: Finding,
+    sourceRoot: string,
+    context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<ReproTest | null>;
+  /**
    * Judge a patch on one axis, with no knowledge of who wrote it or why.
    * Providers that cannot judge return `null` and are simply not consulted.
    */
@@ -87,6 +113,18 @@ export function createProvider(config: { llmMock?: string }): Promise<Provider |
 interface MockEntry {
   match: { check?: string; code?: string; contains?: string };
   candidates: { file: string; find: string; replace: string; rationale: string }[];
+  /** Optional researcher + planner replay for this finding class. When
+   * present, keyless runs exercise the localize step too — the mock's
+   * localizations are canned the same way its proposals are. */
+  localize?: {
+    rootCause: string;
+    symbols: string[];
+    strategy: string;
+    confidence: 'high' | 'medium' | 'low';
+  };
+  /** Optional tester replay: a canned failing repro test for this finding
+   * class, written before any repair — red-green exercised keylessly. */
+  repro?: { file: string; content: string };
 }
 
 /**
@@ -116,12 +154,25 @@ export class MockProvider implements Provider {
   }
 
   /**
-   * The mock does not localize: it replays canned proposals, so there is
-   * nothing to research. Returning null keeps keyless runs deterministic
-   * — the loop proposes from the raw finding, exactly as before.
+   * The mock localizes only what its entries declare: an entry may carry a
+   * canned `localize` block, replayed for the same finding class as its
+   * proposals. Entries without one return null — the loop proposes from
+   * the raw finding, exactly as before — so keyless runs stay
+   * deterministic while still being able to exercise the researcher +
+   * planner step end to end.
    */
-  async localize(): Promise<null> {
-    return null;
+  async localize(finding: Finding): Promise<{
+    rootCause: string;
+    symbols: string[];
+    strategy: string;
+    confidence: 'high' | 'medium' | 'low';
+  } | null> {
+    return this.matches(finding)?.localize ?? null;
+  }
+
+  /** The tester replays only what its entries declare, like localize. */
+  async reproduce(finding: Finding): Promise<ReproTest | null> {
+    return this.matches(finding)?.repro ?? null;
   }
 
   async propose(
@@ -248,6 +299,52 @@ You may inspect the codebase first with read_file, grep, and importers.
 To call one, reply {"tool": {"name": ..., "args": {...}}} and the result
 is returned to you. At most 4 tool calls; when ready, reply with the
 localization object.`;
+
+const REPRO_SCHEMA = {
+  type: 'object',
+  properties: {
+    file: { type: 'string', description: 'Path of the new test file, relative to the source root' },
+    content: { type: 'string', description: 'Full content of the test file' },
+    // A read-only tool request, like the others: the engine executes it
+    // and returns the result in the next turn.
+    tool: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', enum: ['read_file', 'grep', 'importers'] },
+        args: { type: 'object' },
+      },
+      required: ['name', 'args'],
+    },
+  },
+  required: ['file', 'content'],
+  additionalProperties: false,
+} as const;
+
+/** The tester's inspection budget, like the researcher's. */
+const MAX_REPRO_TOOL_CALLS = 4;
+
+const REPRO_SYSTEM = `You write a failing test that reproduces a code defect.
+
+You are given one check failure and the source file it lives in. Write one
+minimal test that FAILS on the current tree and would PASS once the defect
+is fixed. This is the red half of red-green: it runs before any repair, and
+the repair is only accepted if this test turns green.
+
+Rules:
+- Use the repo's own test runner and conventions. Follow an existing test
+  file in the repo for the import style, framework, and assertion API.
+- The test must target the DEFECT, not the symptom: it asserts the correct
+  behaviour directly.
+- One test, one assertion. No mocking, no setup beyond what the assertion
+  needs, no coverage of adjacent behaviour.
+- If you cannot write a meaningful repro (the defect is not test-observable),
+  reply with empty strings for both file and content — an abstention is
+  better than a test that cannot fail.
+
+You may inspect the codebase first with read_file, grep, and importers.
+To call one, reply {"tool": {"name": ..., "args": {...}}} and the result
+is returned to you. At most 4 tool calls; when ready, reply with the
+repro test.`;
 
 const CRITIC_SCHEMA = {
   type: 'object',
@@ -698,6 +795,74 @@ export class ClaudeProvider implements Provider {
       strategy: String(parsed.strategy ?? ''),
       confidence,
     };
+  }
+
+  /**
+   * The tester step. Called before propose, so the repair's only job is
+   * to turn the repro green. The loop validates that the file is inside
+   * the source root and does not already exist, then confirms it is red
+   * by running the checks — a repro that cannot fail is discarded the
+   * same way a patch that cannot apply is.
+   */
+  async reproduce(
+    finding: Finding,
+    sourceRoot: string,
+    _context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<ReproTest | null> {
+    const file = finding.file;
+    if (!file) return null;
+    this.usage = { inputTokens: 0, outputTokens: 0 };
+
+    const { readFile } = await import('node:fs/promises');
+    let body = '';
+    try {
+      body = await readFile(file, 'utf8');
+    } catch {
+      return null;
+    }
+    const rel = relative(sourceRoot, file);
+    const base =
+      [
+        `Defect (${finding.check}, ${finding.severity}): ${finding.summary}`,
+        '',
+        `Evidence:`,
+        JSON.stringify(finding.evidence, null, 2),
+        '',
+        `Reported in: ${rel}`,
+        '```',
+        body.length > 60_000 ? body.slice(0, 60_000) + '\n/* …truncated… */' : body,
+        '```',
+      ].join('\n');
+
+    const transcript: string[] = [];
+    let prompt = base;
+    let toolCalls = 0;
+    let parsed: any = null;
+    for (;;) {
+      parsed = await this.call(REPRO_SYSTEM, prompt, REPRO_SCHEMA);
+      const tool = parsed && typeof parsed === 'object' ? (parsed as any).tool : undefined;
+      if (!tool) break;
+      if (toolCalls >= MAX_REPRO_TOOL_CALLS) {
+        parsed = null;
+        break;
+      }
+      const result = tools
+        ? tools.run(tool.name ?? '', tool.args ?? {})
+        : 'error: no tools available in this run';
+      transcript.push(renderTool(tool, result));
+      prompt = base + transcript.join('');
+      toolCalls++;
+    }
+
+    this.lastUsage = this.usage;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const reproFile = String(parsed.file ?? '');
+    const content = String(parsed.content ?? '');
+    // Abstention is a real answer: a repro that cannot fail would be
+    // discarded by the loop's red check anyway, so declare it as none.
+    if (!reproFile || !content) return null;
+    return { file: reproFile, content };
   }
 
   async critique(patch: Patch, finding: Finding, question: string) {
