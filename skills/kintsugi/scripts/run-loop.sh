@@ -83,22 +83,32 @@ is_python_repo() {
   return 1
 }
 
-# --install-agents: ship the nine-role fleet (observer, researcher,
-# planner, tester, healer, critic, verifier, checker, overseer) into the
-# user-level Claude Code agents dir, so the loop can be driven by hand.
-# The fleet lives in the skill dir (`agents/`, the skill-only layout) or in
-# the engine checkout (`.claude/agents/`, the plugin layout).
+# --install-agents: ship the ten-role fleet (observer, researcher,
+# planner, tester, healer, critic, verifier, checker, overseer, pusher)
+# into the user-level Claude Code agents dir, so the loop can be driven by
+# hand. The fleet lives in three identical copies: the skill dir
+# (`agents/`, the skill-only layout), the engine checkout
+# (`.claude/agents/`, the standalone layout), and the plugin root
+# (`agents/`, the Claude Code plugin layout).
 if [[ " $* " == *" --install-agents "* ]]; then
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ -d "$here/agents" ]]; then
+  # `here` is the scripts/ directory; the fleet ships next to the skill, one
+  # level up (agents/ at the skill root). Check the skill root first — it is
+  # the layout every install produces — then the engine checkout's
+  # standalone copy, then the engine's plugin-root copy.
+  if [[ -d "$here/../agents" ]]; then
+    AGENT_SRC="$(cd "$here/.." && pwd)/agents"
+  elif [[ -d "$here/agents" ]]; then
     AGENT_SRC="$here/agents"
-  else
+  elif [[ -d "$(find_engine)/.claude/agents" ]]; then
     AGENT_SRC="$(find_engine)/.claude/agents"
+  else
+    AGENT_SRC="$(find_engine)/agents"
   fi
   [[ -f "$AGENT_SRC/kintsugi-observer.md" ]] || { echo "kintsugi: agent definitions not found at $AGENT_SRC" >&2; exit 1; }
   mkdir -p "$HOME/.claude/agents"
   cp "$AGENT_SRC"/kintsugi-*.md "$HOME/.claude/agents/"
-  echo "kintsugi: installed the fleet (observer, researcher, planner, tester, healer, critic, verifier, checker, overseer) → $HOME/.claude/agents/" >&2
+  echo "kintsugi: installed the fleet (observer, researcher, planner, tester, healer, critic, verifier, checker, overseer, pusher) → $HOME/.claude/agents/" >&2
   echo "kintsugi: drive it by hand — ask kintsugi-researcher to localize a defect, kintsugi-tester to write its repro, kintsugi-healer to propose a repair, kintsugi-verifier to apply and prove it." >&2
   exit 0
 fi

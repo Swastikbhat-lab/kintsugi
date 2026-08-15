@@ -110,9 +110,9 @@ loads the instructions when checks fail, and runs the bundled engine via
 `scripts/run-loop.sh`. The skill is progressive-disclosure shaped: ~100
 tokens of frontmatter until a failing check triggers it. It ships its own
 agent fleet too — the loop's roles (observer, researcher, planner,
-tester, healer, critic, verifier, checker, overseer) are Claude Code
-subagents, bundled at `skills/kintsugi/agents/` and installed user-wide
-with one command:
+tester, healer, critic, verifier, checker, overseer, pusher) are Claude
+Code subagents, bundled at `skills/kintsugi/agents/` and installed
+user-wide with one command:
 
 ```bash
 ~/.claude/skills/kintsugi/scripts/run-loop.sh --install-agents
@@ -199,6 +199,44 @@ specific, writes a config:
 A custom check is a shell command that prints `path: message` lines. A check
 that crashes with no output is a broken harness — reported, never healed.
 
+## CLI reference
+
+Invoke the engine directly (`npm run cli -- <flags>` for the TS engine,
+`python -m kintsugi <flags>` for the Python engine — a faithful port of
+everything here except the pusher's `--push`, or
+`~/.claude/skills/kintsugi/scripts/run-loop.sh <flags>` from anywhere — it
+forwards every flag and resolves relative paths against your repo). The
+skill wrapper adds two of its own: `--install-agents` ships the ten-role
+fleet into `~/.claude/agents/`, and `--selfcheck` verifies the whole
+install end-to-end without writing a byte.
+
+| Flag | What it does |
+|---|---|
+| `--source <path>` | Repo root under audit (default `.`). Checks run here; patches cannot leave it. |
+| `--config <path>` | Config file (default `<source>/kintsugi.config.json`). |
+| `--checks a,b,c` | Run only these checks, by config name. |
+| `--list-checks` | Print the checks that would run, then exit. |
+| `--budget <n>` | Repair attempts per finding (default 2). |
+| `--max <n>` | Iteration ceiling — a loop that cannot converge cannot run forever (default 12). |
+| `--dry` | Survey every finding and say what *would* be fixed; write nothing. |
+| `--watch` | Keep the loop resident: repair the repo as it drifts (Ctrl+C to stop). |
+| `--interval <secs>` | With `--watch`: also re-check every N seconds for drift that touches no files. |
+| `--allow-shared` | Permit patches on files other modules import (escalated by default — that is a decision, not a fix). |
+| `--quarantined-ok` | Exit 0 when the only remaining findings are quarantined (a human decision). |
+| `--git` | Commit each verified fix on its own branch. Requires a clean tree, so the loop's edits never mix with yours. |
+| `--branch <name>` | Branch to use with `--git` (default `kintsugi/fixes`). |
+| `--push` | The pusher role: after the run, push the fix branch to origin so the verified repairs are one PR away (requires `--git` and a remote). |
+| `--llm-mock <path>` | Replay canned proposals instead of calling a model — the full loop demonstrable without a key. |
+| `--state <path>` | Ledger path (default `~/.kintsugi/ledgers/<hash>.json`). |
+| `--json` | Machine-readable final report on stdout — stdout stays clean, progress goes to stderr. |
+| `--audit-log <path>` | Append one NDJSON line per repair attempt plus a run summary (fingerprint, outcome, cost). No service needed. |
+| `--trace <id>` | Audit a finished run: read its Langfuse trace and print the per-finding cost table (needs `LANGFUSE_*` keys). |
+
+Exit code `0` when nothing actionable remains, `1` while defects do — so the
+loop gates a pipeline (`--quarantined-ok` relaxes it). `--json` is what the
+GitHub Action pipes into a file; `--audit-log` and `--trace` are the two
+observability exports, detailed in [Observability](#observability).
+
 ## What it repairs
 
 | Defect | Repair | How |
@@ -255,6 +293,7 @@ say which one caused what. See
 | **verifier** | verify | Applies the patch and re-runs the checks: kept only if the finding is gone *and* nothing new appeared | the serial tail, `verifyPatch()` |
 | **checker** | settle | One final whole-tree pass after all repairs — catches interactions between individually-verified fixes | `finalCheck()` after the loop |
 | **overseer** | settle | The only role with the whole run: decides converge, escalate, or stop | the loop's settle + ledger |
+| **pusher** | settle | Commits per-fix, then pushes the branch so the verified repairs are one PR away | the `--push` flag, `pushBranch()` in `src/git.ts` |
 
 Every role is also a Claude Code subagent, bundled at
 `skills/kintsugi/agents/` and installed with `--install-agents`. The model
