@@ -132,7 +132,9 @@ export class Loop {
 
       // Establish up front whether the model path works, rather than letting
       // a bad credential masquerade as the model having nothing to suggest.
-      const provider = await createProvider(this.config);
+      // A config may inject a provider object directly (tests); otherwise
+      // build one from --llm-mock or the installed SDK.
+      const provider = this.config.provider ?? (await createProvider(this.config));
       if (!provider) {
         this.say('settle', 'No model configured — running rules-only (every patch is still verified the same way)');
       } else if (provider.name === 'mock') {
@@ -158,6 +160,15 @@ export class Loop {
       if (this.state.status === 'running') {
         this.state.status = 'exhausted';
         this.say('settle', `Iteration budget (${this.config.maxIterations}) reached`);
+      }
+
+      // The checker: one final whole-tree pass over the complete result.
+      // The per-patch verifier saw each repair in isolation; this certifies
+      // the tree after all of them together, catching interactions between
+      // individually-verified repairs. Certification is a report, not a
+      // repair — anything red stays red in the findings.
+      if (!this.config.dryRun) {
+        await this.finalCheck();
       }
     } catch (err) {
       this.state.status = 'failed';
@@ -336,6 +347,43 @@ export class Loop {
           try {
             const history = this.ledger.history(target.fingerprint);
             const { scope, importers } = scopeOf(graph, target.file ?? '');
+
+            // The researcher + planner step: localize the finding to the
+            // symbol that causes it before proposing. Symbol-level
+            // localization is the strongest empirical predictor of a
+            // successful repair (SWE-bench agent studies); proposing
+            // against the raw symptom is how fixes miss. A provider that
+            // cannot localize returns null and the loop proposes as before.
+            let localization: Awaited<ReturnType<NonNullable<Provider['localize']>>> | undefined;
+            if (this.provider.localize) {
+              try {
+                localization = await this.provider.localize(
+                  target,
+                  sourceRoot,
+                  {
+                    ...(history.length
+                      ? {
+                          ledger: history.map((a) => ({
+                            outcome: a.outcome,
+                            patch: { find: a.patch.find, replace: a.patch.replace },
+                          })),
+                        }
+                      : {}),
+                    ...(scope === 'shared' ? { importers } : {}),
+                  },
+                  new ToolRunner(sourceRoot, graph),
+                );
+                if (localization) {
+                  emit(`Researcher: ${localization.rootCause}`);
+                  emit(`Planner: ${localization.strategy}`);
+                } else {
+                  emit('Researcher: unlocalized — proposing from the raw finding');
+                }
+              } catch (err) {
+                emit(`Researcher failed: ${(err as Error).message}`);
+              }
+            }
+
             candidates = await this.provider.propose(target, sourceRoot, {
               ...(history.length
                 ? {
@@ -346,6 +394,7 @@ export class Loop {
                   }
                 : {}),
               ...(scope === 'shared' ? { importers } : {}),
+              ...(localization ? { localization } : {}),
             }, new ToolRunner(sourceRoot, graph));
             emit(`${this.provider.name} proposed ${candidates.length} candidate(s)`);
             const usage = (this.provider as any)?.lastUsage ?? {};
@@ -558,6 +607,48 @@ export class Loop {
     }
 
     return settled;
+  }
+
+  /** Run every check once, concurrently, like the observer fan-out does. */
+  private async _runAll(
+    checks: RunConfig['checks'],
+    sourceRoot: string,
+  ): Promise<CheckResult[]> {
+    return Promise.all(checks.map((c) => runCheck(c, sourceRoot)));
+  }
+
+  /**
+   * The checker's pass: re-run the entire configured check suite once more
+   * against the repaired tree and report the certification. Emits a clear
+   * verdict line, and — if new findings appeared that were not in the
+   * per-patch baselines — names them as the interaction case this pass
+   * exists to catch. Read-only: it never repairs.
+   */
+  private async finalCheck(): Promise<void> {
+    const { checks, sourceRoot } = this.config;
+    try {
+      const runs = await this._runAll(checks, sourceRoot);
+      const findings = runs.flatMap((r) => r.findings);
+      const { kept } = suppressFindings(findings);
+      const crashed = runs.filter((r) => r.crashed).map((r) => r.check);
+      this.say('settle', `Checker: re-ran ${checks.length} check(s) over the complete result`);
+      if (kept.length === 0 && crashed.length === 0) {
+        this.say('settle', 'Checker: tree certified clean — every check passes on the final state.');
+      } else {
+        if (kept.length) {
+          this.say('settle', `Checker: ${kept.length} finding(s) remain — ` +
+            `${kept.filter((f) => this.state.findings.some((s) => s.fingerprint === f.fingerprint)).length} ` +
+            `already known, ${kept.length - kept.filter((f) => this.state.findings.some((s) => s.fingerprint === f.fingerprint)).length} new ` +
+            `(an interaction between repairs — the case this pass exists for).`);
+        }
+        if (crashed.length) {
+          this.say('settle', `Checker: ${crashed.join(', ')} crashed — a broken harness, not a defect.`);
+        }
+        this.say('settle', 'Checker: NOT certified. The tree is not clean; findings above remain for a human.');
+      }
+    } catch (err) {
+      this.say('settle', `Checker failed to run: ${(err as Error).message}`);
+    }
   }
 
   /** Dry-run survey: report every finding's mechanical answer, write nothing. */

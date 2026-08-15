@@ -4,7 +4,66 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Loop } from '../src/loop.js';
 import { copyFixture, tempStatePath } from './helpers.js';
-import type { RunConfig } from '../src/types.js';
+import type { Provider } from '../src/provider.js';
+import type { Patch, RunConfig, Finding } from '../src/types.js';
+
+/** A provider that localizes before proposing, recording what it saw. */
+class LocalizingProvider implements Provider {
+  readonly name = 'localizing-test';
+  localized: Finding | null = null;
+  proposedWithLocalization = false;
+  async preflight() {
+    return { ok: true, detail: 'reachable' };
+  }
+  async localize(finding: Finding) {
+    this.localized = finding;
+    return {
+      rootCause: 'the tax rate is wrong',
+      symbols: ['applyTax'],
+      strategy: 'return the correct rate',
+      confidence: 'high' as const,
+    };
+  }
+  async propose(_f: Finding, _root: string, context?: import('../src/provider.js').ProposerContext & { localization?: unknown }) {
+    if (context?.localization) this.proposedWithLocalization = true;
+    const patch: Patch = {
+      id: 't', file: '', find: '', replace: '', rationale: '', scope: 'local',
+    };
+    return [patch];
+  }
+  async critique() {
+    return { verdict: 'keep' as const, reason: 'ok' };
+  }
+}
+
+test('the loop runs the researcher (localize) before proposing and hands it to the proposer', async () => {
+  const source = copyFixture();
+  const cfg = JSON.parse(readFileSync(resolve(import.meta.dirname, '../fixture/kintsugi.config.json'), 'utf8'));
+  const provider = new LocalizingProvider();
+  const config: RunConfig = {
+    sourceRoot: source,
+    checks: cfg.checks,
+    budget: cfg.budget,
+    maxIterations: cfg.maxIterations,
+    dryRun: false,
+    allowShared: cfg.allowShared,
+    statePath: tempStatePath(),
+    provider,
+  };
+
+  const events: string[] = [];
+  const state = await new Loop(config, (e) => events.push(e.message)).run();
+
+  // The localize step ran against a real finding and the events fired.
+  assert.ok(provider.localized, 'researcher was consulted');
+  assert.ok(events.some((m) => m.startsWith('Researcher:')), `expected researcher event, got: ${events.filter((e) => e.includes('Researcher')).join(' | ')}`);
+  assert.ok(events.some((m) => m.startsWith('Planner:')), 'expected planner event');
+  // The localization reached the proposer.
+  assert.ok(provider.proposedWithLocalization, 'proposer received the localization');
+  // The loop ran end to end — at least one iteration completed.
+  assert.ok(state.iteration >= 1);
+  assert.ok(['converged', 'exhausted', 'failed'].includes(state.status));
+});
 
 test('the loop repairs five defect classes and quarantines the sixth', async () => {
   const source = copyFixture();

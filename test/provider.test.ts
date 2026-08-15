@@ -8,6 +8,10 @@ import { ToolRunner } from '../src/tools.js';
 import { buildImportGraph } from '../src/imports.js';
 import type { Finding } from '../src/types.js';
 
+function root(): string {
+  return mkdtempSync(join(tmpdir(), 'kintsugi-provider-'));
+}
+
 function finding(over: Partial<Finding>): Finding {
   return {
     fingerprint: 'f',
@@ -149,4 +153,60 @@ test('ClaudeProvider: an unknown tool is reported back to the model', async () =
   const cands = await provider.propose(finding({ file }), root, undefined, new ToolRunner(root));
   assert.equal(cands.length, 1);
   assert.ok(client.calls[1].messages[0].content.includes('unknown tool'));
+});
+
+// ------------------------------------------------------------- localize (researcher)
+
+const LOCALIZED = JSON.stringify({
+  rootCause: 'apply_tax returns the amount unchanged instead of applying the rate',
+  symbols: ['apply_tax'],
+  strategy: 'multiply the amount by the rate before returning',
+  confidence: 'high',
+});
+
+test('ClaudeProvider: localize returns the researcher map without proposing', async () => {
+  const root = makeRepo({ 'src/tax.py': 'def apply_tax(amount):\n    return amount\n' });
+  const file = join(root, 'src/tax.py');
+  const client = new FakeClient([new FakeRes(LOCALIZED)]);
+  const provider = new ClaudeProvider(client as any);
+
+  const loc = await provider.localize(finding({ file }), root, undefined, new ToolRunner(root));
+  assert.ok(loc);
+  assert.equal(loc.rootCause, 'apply_tax returns the amount unchanged instead of applying the rate');
+  assert.ok(loc.symbols.includes('apply_tax'));
+  assert.equal(loc.confidence, 'high');
+  // Localize proposes nothing — one call, no patch schema.
+  assert.equal(client.calls.length, 1);
+  assert.ok(client.calls[0].messages[0].content.includes('Reported in'));
+});
+
+test('ClaudeProvider: localize may use a read-only tool before answering', async () => {
+  const root = makeRepo({ 'src/tax.py': 'def apply_tax(amount):\n    return amount\n' });
+  const file = join(root, 'src/tax.py');
+  const toolReq = JSON.stringify({ tool: { name: 'grep', args: { pattern: 'def apply' } } });
+  const client = new FakeClient([new FakeRes(toolReq), new FakeRes(LOCALIZED)]);
+  const provider = new ClaudeProvider(client as any);
+
+  const loc = await provider.localize(finding({ file }), root, undefined, new ToolRunner(root));
+  assert.ok(loc);
+  assert.equal(loc.symbols[0], 'apply_tax');
+  // The tool result was fed back into the second call's prompt.
+  assert.ok(client.calls[1].messages[0].content.includes('def apply_tax'));
+});
+
+test('ClaudeProvider: localize without a file returns null', async () => {
+  const provider = new ClaudeProvider(new FakeClient([]) as any);
+  const loc = await provider.localize(finding({}), root(), undefined, undefined);
+  assert.equal(loc, null);
+});
+
+test('MockProvider: localize returns null so keyless runs stay deterministic', async () => {
+  const { MockProvider } = await import('../src/provider.js');
+  const mockPath = join(root(), 'mock.json');
+  writeFileSync(mockPath, JSON.stringify([{
+    match: { contains: 'x' },
+    candidates: [{ file: 'a.ts', find: 'a', replace: 'b', rationale: 'r' }],
+  }]));
+  const mock = new MockProvider(mockPath);
+  assert.equal(await mock.localize(), null);
 });

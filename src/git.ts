@@ -107,3 +107,22 @@ export async function head(sourceRoot: string): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * Push the current branch to its upstream (or origin, if it has none).
+ * The pusher role's one git write beyond committing: after the loop
+ * verified and committed the repairs, this makes them reachable for a PR.
+ * Deliberately conservative — no force, no tags, no remotes invented. A
+ * push is only as safe as the branch it ships, and the loop has already
+ * proven every commit on it.
+ */
+export async function pushBranch(sourceRoot: string, branch: string): Promise<string> {
+  try {
+    // Set upstream on first push so later pushes (e.g. update-a-fix-PR
+    // flows) resolve without re-specifying the remote.
+    await git(sourceRoot, ['push', '-u', 'origin', branch]);
+    return 'pushed';
+  } catch {
+    return 'no-remote';
+  }
+}

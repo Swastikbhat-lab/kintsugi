@@ -42,6 +42,25 @@ export interface Provider {
     tools?: ToolRunner,
   ): Promise<Patch[]>;
   /**
+   * The researcher + planner step: localize the finding to the symbol and
+   * call chain that actually cause it, and name the repair strategy —
+   * *before* any patch is proposed. Empirically (SWE-bench agent studies)
+   * symbol-level localization is the strongest predictor of a successful
+   * repair. Providers that cannot localize return `null` and the loop
+   * proposes from the raw finding, as before.
+   */
+  localize?(
+    finding: Finding,
+    sourceRoot: string,
+    context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<{
+    rootCause: string;
+    symbols: string[];
+    strategy: string;
+    confidence: 'high' | 'medium' | 'low';
+  } | null>;
+  /**
    * Judge a patch on one axis, with no knowledge of who wrote it or why.
    * Providers that cannot judge return `null` and are simply not consulted.
    */
@@ -94,6 +113,15 @@ export class MockProvider implements Provider {
       if (m.contains && !finding.summary.includes(m.contains)) return false;
       return true;
     });
+  }
+
+  /**
+   * The mock does not localize: it replays canned proposals, so there is
+   * nothing to research. Returning null keeps keyless runs deterministic
+   * — the loop proposes from the raw finding, exactly as before.
+   */
+  async localize(): Promise<null> {
+    return null;
   }
 
   async propose(
@@ -162,9 +190,64 @@ const PATCH_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The researcher's inspection budget: at most this many read-only tool
+ * calls while localizing a finding, so a curious model cannot balloon the
+ * prompt. The proposer then gets its own budget on top. */
+const MAX_LOCALIZE_TOOL_CALLS = 4;
+
 /** The proposer's inspection budget: at most this many read-only tool calls
  * per finding, so a curious model cannot balloon the prompt. */
 const MAX_TOOL_CALLS = 6;
+
+const LOCALIZE_SCHEMA = {
+  type: 'object',
+  properties: {
+    rootCause: { type: 'string', description: 'One sentence: the actual defect, distinct from the reported symptom' },
+    symbols: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'The symbol(s) where the defect lives, not where it was reported',
+    },
+    strategy: { type: 'string', description: 'One sentence: the smallest repair that could clear the finding' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    // A read-only tool request, like the proposer's: the engine executes it
+    // and returns the result in the next turn.
+    tool: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', enum: ['read_file', 'grep', 'importers'] },
+        args: { type: 'object' },
+      },
+      required: ['name', 'args'],
+    },
+  },
+  required: ['rootCause', 'symbols', 'strategy', 'confidence'],
+  additionalProperties: false,
+} as const;
+
+const LOCALIZE_SYSTEM = `You localize a code defect before it is repaired.
+
+You are given one check failure and the source file it lives in. Your job
+is to find the symbol and call chain that actually CAUSE the failure —
+which is often not the file or line that reported it.
+
+Empirically, code-symbol-level localization predicts repair success far
+better than file-level. A file is where the symptom appears; a symbol is
+where the defect lives.
+
+Rules:
+- Follow the trace: read the failing assertion / import / call and walk to
+  the root. Quote the line that proves it.
+- Distinguish root cause from symptom. The failing test is the symptom;
+  the wrong constant, missing export, or stale import is the cause.
+- If you cannot name a symbol with confidence, set confidence to low and
+  say so. A vague localization is worse than none.
+- You only localize. You do not propose patches.
+
+You may inspect the codebase first with read_file, grep, and importers.
+To call one, reply {"tool": {"name": ..., "args": {...}}} and the result
+is returned to you. At most 4 tool calls; when ready, reply with the
+localization object.`;
 
 const CRITIC_SCHEMA = {
   type: 'object',
@@ -226,6 +309,26 @@ function renderTool(tool: { name?: string; args?: Record<string, unknown> }, res
     `Result:\n${result}\n` +
     '\nReply with your next tool call, or your final {"patches": [...]}.'
   );
+}
+
+/** Render a localization into the proposer's prompt: the researcher's
+ * root-cause map, the symbols it names, and the repair strategy it chose.
+ * The proposer codes against this instead of the raw symptom. */
+function localizationBlock(loc: {
+  rootCause: string;
+  symbols: string[];
+  strategy: string;
+  confidence: string;
+} | null): string {
+  if (!loc) return '';
+  const parts = [
+    'The researcher localized this finding before you (confidence: ' +
+      `${loc.confidence}). Code against the root cause, not the symptom:`,
+    `- Root cause: ${loc.rootCause}`,
+    `- Defect symbol(s): ${loc.symbols.join(', ') || '(unknown)'}`,
+    `- Repair strategy: ${loc.strategy}`,
+  ];
+  return '\n\n' + parts.join('\n');
 }
 
 /** Render the proposer's context into the prompt: what the ledger remembers
@@ -392,7 +495,12 @@ export class ClaudeProvider implements Provider {
   async propose(
     finding: Finding,
     sourceRoot: string,
-    context?: ProposerContext,
+    context?: ProposerContext & { localization?: {
+      rootCause: string;
+      symbols: string[];
+      strategy: string;
+      confidence: string;
+    } },
     tools?: ToolRunner,
   ): Promise<Patch[]> {
     const file = finding.file;
@@ -413,7 +521,7 @@ export class ClaudeProvider implements Provider {
         '```',
         body.length > 60_000 ? body.slice(0, 60_000) + '\n/* …truncated… */' : body,
         '```',
-      ].join('\n') + contextBlock(context, rel);
+      ].join('\n') + localizationBlock(context?.localization ?? null) + contextBlock(context, rel);
 
     // The inspection loop: the model may call declared read-only tools
     // (read_file, grep, importers), one per reply, and each result is
@@ -514,6 +622,82 @@ export class ClaudeProvider implements Provider {
       });
     }
     return { kept, rejected };
+  }
+
+  /**
+   * The researcher + planner step. Called before propose when the rules
+   * cannot reach the finding. Its result is rendered into the proposer's
+   * prompt, so the proposer codes against a localization instead of a
+   * symptom. A localization that names the wrong symbol is caught by the
+   * same verify gate that catches a wrong patch — the loop's trust does
+   * not move to this step, only its starting point.
+   */
+  async localize(
+    finding: Finding,
+    sourceRoot: string,
+    _context?: ProposerContext,
+    tools?: ToolRunner,
+  ): Promise<{
+    rootCause: string;
+    symbols: string[];
+    strategy: string;
+    confidence: 'high' | 'medium' | 'low';
+  } | null> {
+    const file = finding.file;
+    if (!file) return null;
+    this.usage = { inputTokens: 0, outputTokens: 0 };
+
+    const { readFile } = await import('node:fs/promises');
+    let body = '';
+    try {
+      body = await readFile(file, 'utf8');
+    } catch {
+      return null;
+    }
+    const rel = relative(sourceRoot, file);
+    const base =
+      [
+        `Defect (${finding.check}, ${finding.severity}): ${finding.summary}`,
+        '',
+        `Evidence:`,
+        JSON.stringify(finding.evidence, null, 2),
+        '',
+        `Reported in: ${rel}`,
+        '```',
+        body.length > 60_000 ? body.slice(0, 60_000) + '\n/* …truncated… */' : body,
+        '```',
+      ].join('\n');
+
+    const transcript: string[] = [];
+    let prompt = base;
+    let toolCalls = 0;
+    let parsed: any = null;
+    for (;;) {
+      parsed = await this.call(LOCALIZE_SYSTEM, prompt, LOCALIZE_SCHEMA);
+      const tool = parsed && typeof parsed === 'object' ? (parsed as any).tool : undefined;
+      if (!tool) break;
+      if (toolCalls >= MAX_LOCALIZE_TOOL_CALLS) {
+        parsed = null;
+        break;
+      }
+      const result = tools
+        ? tools.run(tool.name ?? '', tool.args ?? {})
+        : 'error: no tools available in this run';
+      transcript.push(renderTool(tool, result));
+      prompt = base + transcript.join('');
+      toolCalls++;
+    }
+
+    this.lastUsage = this.usage;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const confidence = parsed.confidence;
+    if (confidence !== 'high' && confidence !== 'medium' && confidence !== 'low') return null;
+    return {
+      rootCause: String(parsed.rootCause ?? ''),
+      symbols: Array.isArray(parsed.symbols) ? parsed.symbols.map(String) : [],
+      strategy: String(parsed.strategy ?? ''),
+      confidence,
+    };
   }
 
   async critique(patch: Patch, finding: Finding, question: string) {

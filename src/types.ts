@@ -154,10 +154,18 @@ export interface RunConfig {
   auditLog?: string;
   /** Replay canned proposals instead of calling a model (demo, tests). */
   llmMock?: string;
+  /**
+   * Inject a provider directly (tests). When unset the loop builds one
+   * from llmMock or the installed SDK. Mirrors the Python engine, whose
+   * config accepts the same injection.
+   */
+  provider?: import('./provider.js').Provider;
   /** Commit each verified patch on a branch of its own. */
   git?: boolean;
   /** Branch to work on in git mode. */
   branch?: string;
+  /** Push the fix branch after the run (the pusher role; requires git mode). */
+  push?: boolean;
   /** Exit 0 when the only remaining findings are quarantined. */
   quarantinedOk?: boolean;
 }
