@@ -1,7 +1,7 @@
 {
   "name": "kintsugi",
   "description": "Self-healing repair loop for codebases: observes failing checks (tests, typecheck, lint, bandit, radon, custom scripts), repairs the ones with a provable fix, verifies every repair by re-running the checks, generates tests for untested code, and quarantines the rest with evidence.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Swastikbhat-lab"
   },
